@@ -338,8 +338,11 @@ public class WestmangaParser(
             val title = item.getStringOrNull("title")
                 ?: item.getStringOrNull("number")?.let { "Chapter $it" }
             val number = item.getStringOrNull("number")?.toFloatOrNull() ?: 0f
-            val uploadDate = item.optJSONObject("created_at")?.optLong("time", 0L)
-                ?: item.optLong("created_at", 0L)
+            // API time is unix SECONDS; MangaChapter.uploadDate is MILLISECONDS
+            val uploadDate = (
+                item.optJSONObject("created_at")?.optLong("time", 0L)
+                    ?: item.optLong("created_at", 0L)
+                ) * 1000L
             add(
                 MangaChapter(
                     id = generateUid(source, slug),
