@@ -2,7 +2,7 @@
 
 Plugin sumber manga Indonesia untuk aplikasi baca manga **Usagi** (dan aplikasi berbasis Kotatsu).
 
-Satu file `indosource.jar` berisi **9 sumber**:
+Satu file `indosource.jar` berisi **10 sumber**:
 
 | Sumber | Domain utama | Teknik |
 |---|---|---|
@@ -15,6 +15,7 @@ Satu file `indosource.jar` berisi **9 sumber**:
 | Cosmic Toons | 02.cosmicscans.to | JSON API |
 | Komiknesia | v1.komiknesiaku.com | JSON API |
 | Westmanga | v1.westmanga.my | JSON API (signed) |
+| Ainz Scans | v3.ainzscans01.com | JSON API |
 
 Format plugin: `org.koitharu.kotatsu.parsers` (classic Kotatsu), di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
 
@@ -66,7 +67,7 @@ Catatan: beberapa situs butuh koneksi internet normal dari Indonesia (beberapa d
 1. **Tidak ada akses ke data pribadi.** Plugin hanya membaca halaman web / API publik situs manga. Tidak ada permission Android tambahan selain internet, tidak ada telemetri, tidak ada tracker, tidak ada akses file/telepon/kontak.
 2. **Kode sumber terbuka.** Seluruh kode parser ada di folder [`src/`](src/) — siapa pun bisa mengauditnya.
 3. **Rilis transparan.** File `indosource.jar` di setiap Release dibuat dari kode di `src/` (Kotlin → fat jar → dex dengan d8). Tidak ada binary tersembunyi.
-4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, dll). Tidak ada domain lain.
+4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, dll). Tidak ada domain lain.
 5. **Berjalan di sandbox plugin.** Jar dimuat lewat PluginClassLoader aplikasi sebagai plugin, bukan aplikasi mandiri; aplikasi yang mengatur batasannya.
 
 Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan install jar yang dibagikan orang lain di sembarang tempat.
@@ -85,7 +86,7 @@ gradle buildJar
 d8 --release --lib $ANDROID_HOME/platforms/android-35/android.jar --min-api 24 plugin.jar --output indosource.jar
 ```
 
-Hasilnya `indosource.jar` (~1.9 MB) — file yang sama dengan yang ada di Release.
+Hasilnya `indosource.jar` (~2.0 MB) — file yang sama dengan yang ada di Release.
 
 ---
 
