@@ -143,7 +143,7 @@ public class AinzScansParser(
 
         val title = json.getStringOrNull("title") ?: manga.title
         val altTitles = parseAltTitles(json.getStringOrNull("alternative_titles"))
-        val cover = json.getStringOrNull("poster_image_url") ?: manga.coverUrl
+        val cover = parseCoverUrl(json.getStringOrNull("poster_image_url")) ?: manga.coverUrl
         val tags = parseGenres(json.optJSONArray("genres"))
         val chapters = json.optJSONArray("units")
             ?.let { array -> parseChapters(slug, array) }
@@ -267,7 +267,7 @@ public class AinzScansParser(
             publicUrl = relativeUrl.toAbsoluteUrl(domain),
             rating = parseRating(item.getStringOrNull("rating_average")),
             contentRating = sourceContentRating,
-            coverUrl = item.getStringOrNull("poster_image_url"),
+            coverUrl = parseCoverUrl(item.getStringOrNull("poster_image_url")),
             tags = emptySet(),
             state = parseState(item.getStringOrNull("comic_status")),
             authors = emptySet(),
@@ -346,6 +346,18 @@ public class AinzScansParser(
             .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
             .filter { it != "Unknown" }
             .forEach(::add)
+    }
+
+    private fun parseCoverUrl(raw: String?): String? {
+        if (raw.isNullOrBlank()) return null
+        // Legacy WordPress CDN host (ainzscans01.com/wp-content/...) — every cover
+        // there returns 404/403 since the platform migration (verified Aug 2026:
+        // all 183 covers on this host in the 3591-series catalog are dead; api. and
+        // adminv2. hosts are fine). Emit null so the app shows its placeholder
+        // instead of a broken card image.
+        val host = raw.substringAfter("://", "").substringBefore('/')
+        if (host == LEGACY_COVER_HOST) return null
+        return raw
     }
 
     private fun parseState(raw: String?): MangaState? = when (raw?.uppercase(Locale.ROOT)) {
@@ -454,6 +466,7 @@ public class AinzScansParser(
         private const val COMIC_PATH = "comic"
         private const val SEARCH_PATH = "search"
         private const val SERIES_PATH = "series/comic/"
+        private const val LEGACY_COVER_HOST = "ainzscans01.com"
 
         private const val COLOR_TAG_PREFIX = "color:"
         private const val COLOR_TAG_KEY_COLORED = "color:full_color"
