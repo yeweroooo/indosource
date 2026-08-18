@@ -10,6 +10,8 @@ import tsuki.config.ConfigKey
 import tsuki.core.PagedMangaParser
 import tsuki.model.ContentRating
 import tsuki.model.ContentType
+import tsuki.model.Favicon
+import tsuki.model.Favicons
 import tsuki.model.Manga
 import tsuki.model.MangaChapter
 import tsuki.model.MangaListFilter
@@ -80,6 +82,17 @@ public class CosmicToonsParser(
         super.onCreateConfig(keys)
         keys.add(userAgentKey)
     }
+
+    // The app draws the source icon from getFavicons(). The default implementation
+    // scrapes https://$domain/, and `domain` here is the JSON API host (answers
+    // 404), so no icon was ever found. The site itself only inlines its favicon as
+    // a base64 data URL (settings/general -> faviconDataUrl) which the app cannot
+    // load (Favicon requires an http(s) URL), but the exact same file is served
+    // from their upload CDN — point at it directly.
+    override suspend fun getFavicons(): Favicons = Favicons(
+        listOf(Favicon(FAVICON_URL, 192, "icon")),
+        SITE_URL,
+    )
 
     override suspend fun getListPage(
         page: Int,
@@ -419,6 +432,10 @@ public class CosmicToonsParser(
     private companion object {
         private const val PROJECT_TAG_KEY = "project"
         private const val PROJECT_TAG_TITLE = "Project"
+
+        // Byte-identical to the base64 favicon the site inlines in its HTML.
+        private const val FAVICON_URL = "https://cdncid.csmcscns.id/uploads/2024/01/logo_cosmic.png"
+        private const val SITE_URL = "https://02.cosmicscans.to/"
         private val IMAGE_SRC_REGEX = Regex("<img[^>]+src=['\"]([^'\"]+)['\"]")
 
         private val DATE_FORMATS = arrayOf(

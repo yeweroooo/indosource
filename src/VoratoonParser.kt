@@ -13,6 +13,8 @@ import tsuki.config.ConfigKey
 import tsuki.core.PagedMangaParser
 import tsuki.model.ContentRating
 import tsuki.model.ContentType
+import tsuki.model.Favicon
+import tsuki.model.Favicons
 import tsuki.model.Manga
 import tsuki.model.MangaChapter
 import tsuki.model.MangaListFilter
@@ -86,6 +88,18 @@ public class VoratoonParser(
         super.onCreateConfig(keys)
         keys.add(userAgentKey)
     }
+
+    // Source icon: the app builds it from getFavicons(), whose default
+    // implementation scrapes https://$domain/ — but `domain` is the JSON API host
+    // here ({"hello":"world"}, no <link rel=icon>, /favicon.ico answers 404), so no
+    // icon was ever found. The web frontend serves the real ones.
+    override suspend fun getFavicons(): Favicons = Favicons(
+        listOf(
+            Favicon("https://$SITE_DOMAIN/icon.png", 64, "icon"),
+            Favicon("https://$SITE_DOMAIN/apple-icon.png", 180, "apple-touch-icon"),
+        ),
+        "https://$SITE_DOMAIN/",
+    )
 
     // Reader images on cdn.voratoon.com are hotlink-protected: they return 403
     // without a Referer. The app merges getRequestHeaders() into every request
@@ -450,6 +464,9 @@ public class VoratoonParser(
         private const val RECOMMENDED_TAG_TITLE = "Recommended"
         private const val ANIME_TAG_KEY = "animeAdaptation"
         private const val ANIME_TAG_TITLE = "Anime Adaptation"
+
+        // Web frontend (not the API host) — it serves /icon.png + /apple-icon.png.
+        private const val SITE_DOMAIN = "v1.voratoon.com"
 
         private val DATE_FORMATS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",

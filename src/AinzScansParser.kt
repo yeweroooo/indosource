@@ -10,6 +10,8 @@ import tsuki.config.ConfigKey
 import tsuki.core.PagedMangaParser
 import tsuki.model.ContentRating
 import tsuki.model.ContentType
+import tsuki.model.Favicon
+import tsuki.model.Favicons
 import tsuki.model.Manga
 import tsuki.model.MangaChapter
 import tsuki.model.MangaListFilter
@@ -91,6 +93,15 @@ public class AinzScansParser(
         super.onCreateConfig(keys)
         keys.add(userAgentKey)
     }
+
+    // The site points <link rel="icon"> at an 816x1440 / 177 KB wallpaper on
+    // cdn.uqni.net, so the app was showing a centre crop of a poster instead of the
+    // logo. The ainzscans.net mirror publishes the same crowned-skull artwork as a
+    // proper square apple-touch-icon — use that.
+    override suspend fun getFavicons(): Favicons = Favicons(
+        listOf(Favicon(FAVICON_URL, 180, "apple-touch-icon")),
+        SITE_URL,
+    )
 
     override suspend fun getListPage(
         page: Int,
@@ -467,6 +478,11 @@ public class AinzScansParser(
         private const val SEARCH_PATH = "search"
         private const val SERIES_PATH = "series/comic/"
         private const val LEGACY_COVER_HOST = "ainzscans01.com"
+
+        // Square version of the site logo, published by the ainzscans.net mirror.
+        private const val FAVICON_URL =
+            "https://blogger.googleusercontent.com/img/b/R29vZ2xl/AVvXsEgGuGhM0I3NAj39lsOjNEo1f8JRvlDmcv6yHx3t-OB2y2W1UTKA-GalA2Hk0pH6r7LZyxEYCZmu6I1Szqk5r9aA2R3VI8H_7Fvm2JlAu44Byb0V1kISOisT9oj6UMBcLkzxNeWBQR1EcK2gHy9gua3sbAcGl8drh9Ex95BKTjb18pNDh0HISb34lrNdTgw/s1600/apple-touch-icon.png"
+        private const val SITE_URL = "https://ainzscans.net/"
 
         private const val COLOR_TAG_PREFIX = "color:"
         private const val COLOR_TAG_KEY_COLORED = "color:full_color"
