@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
-# Build indosource.jar — plugin Usagi (tsuki-style) dari src/.
+# Build indosource.jar — plugin Usagi dual-format (tsuki-style + org.koitharu/legacy) dari src/.
 #
 # Pipeline: Kotlin (kotlinc 2.2.10) -> fat jar -> d8 (min API 24) -> classes.dex -> indosource.jar
+#
+# Dual-format agar kompatibel dengan SEMUA versi app:
+#  - tsuki.*      -> app versi tsuki (0.0.32+/1.0.0-rc1), loader cari tsuki.MangaParserFactoryKt
+#  - org.koitharu. -> app lama (0.0.31), loader cari org.koitharu.kotatsu.parsers.MangaParserFactoryKt
+#    (framework core-parsers dibundle penuh; hanya MangaParserSource + factory yang dibuat sendiri)
 #
 # Prasyarat: bash, curl, unzip, zip, JDK 17+ (java di PATH).
 # Semua dependency diunduh otomatis ke ./deps (cukup sekali).
@@ -40,10 +45,12 @@ download "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-coroutine
 download "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-json-jvm/1.11.0/kotlinx-serialization-json-jvm-1.11.0.jar" "$DEP_DIR/serialization-json.jar"
 download "https://repo1.maven.org/maven2/org/jetbrains/kotlinx/kotlinx-serialization-core-jvm/1.11.0/kotlinx-serialization-core-jvm-1.11.0.jar" "$DEP_DIR/serialization-core.jar"
 download "https://dl.google.com/android/maven2/androidx/collection/collection-jvm/1.6.0/collection-jvm-1.6.0.jar" "$DEP_DIR/collection.jar"
+download "https://jitpack.io/com/github/UsagiApp/core-parsers/0.0.3/core-parsers-0.0.3.jar" "$DEP_DIR/core-parsers-0.0.3.jar"
 
 COMPILE_CP="$DEP_DIR/kotlin-stdlib.jar:$DEP_DIR/tsuki-$TSUKI_VERSION.jar:$DEP_DIR/jsoup.jar:$DEP_DIR/okhttp.jar:$DEP_DIR/okio.jar:$DEP_DIR/json.jar:$DEP_DIR/coroutines.jar:$DEP_DIR/serialization-json.jar:$DEP_DIR/serialization-core.jar:$DEP_DIR/collection.jar"
+COMPILE_CP_LEGACY="$DEP_DIR/kotlin-stdlib.jar:$DEP_DIR/core-parsers-0.0.3.jar:$DEP_DIR/jsoup.jar:$DEP_DIR/okhttp.jar:$DEP_DIR/okio.jar:$DEP_DIR/json.jar:$DEP_DIR/coroutines.jar:$DEP_DIR/serialization-json.jar:$DEP_DIR/serialization-core.jar:$DEP_DIR/collection.jar"
 
-# --- 2) compile Kotlin -> kelas JVM (jvm-target 17, cocok dengan app Usagi) ---
+# --- 2) compile (A) tsuki-style -> kelas JVM (jvm-target 17, cocok dengan app Usagi) ---
 rm -rf "$OUT_DIR"
 java -Xmx3g -cp "$DEP_DIR/kotlin-compiler.jar:$DEP_DIR/kotlin-stdlib.jar:$DEP_DIR/coroutines.jar:$DEP_DIR/annotations.jar" \
   org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
@@ -51,17 +58,28 @@ java -Xmx3g -cp "$DEP_DIR/kotlin-compiler.jar:$DEP_DIR/kotlin-stdlib.jar:$DEP_DI
   -classpath "$COMPILE_CP" -jvm-target 17 -d "$OUT_DIR" \
   src/*.kt plugin/tsuki/model/MangaParserSource.kt plugin/tsuki/MangaParserFactory.kt
 
-# --- 3) fat jar: parser + tsuki framework + semua dependency ---
+# --- 2b) compile (B) legacy org.koitharu-style (app lama) -> out-legacy/ ---
+rm -rf "$OUT_DIR-2"
+java -Xmx3g -cp "$DEP_DIR/kotlin-compiler.jar:$DEP_DIR/kotlin-stdlib.jar:$DEP_DIR/coroutines.jar:$DEP_DIR/annotations.jar" \
+  org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
+  -no-stdlib -no-reflect -opt-in=org.koitharu.kotatsu.parsers.InternalParsersApi \
+  -classpath "$COMPILE_CP_LEGACY" -jvm-target 17 -d "${OUT_DIR}-legacy" \
+  src-legacy/*.kt plugin/legacy/model/MangaParserSource.kt plugin/legacy/MangaParserFactory.kt
+
+# --- 3) fat jar: parser (2 gaya) + tsuki + core-parsers + dependency ---
 rm -rf "$ROOT_DIR"
 mkdir -p "$ROOT_DIR"
 for j in "$DEP_DIR"/*.jar; do
   case "$j" in
-    *kotlin-compiler.jar|*r8.jar|*annotations.jar) continue ;; # tooling, bukan runtime
+    *kotlin-compiler.jar|*r8.jar|*annotations.jar|*kotatsu-halal*.jar) continue ;; # tooling / tidak dipakai
   esac
   unzip -oq "$j" -d "$ROOT_DIR" 2>/dev/null || true
 done
+# hindari duplikat CSSBackground (sudah ada dari tsuki jar)
+rm -rf "$ROOT_DIR"/org/koitharu/kotatsu/core/parser/CSSBackground*
 rm -f "$ROOT_DIR"/META-INF/*.SF "$ROOT_DIR"/META-INF/*.DSA "$ROOT_DIR"/META-INF/*.RSA
 cp -r "$OUT_DIR"/* "$ROOT_DIR"/
+cp -r "${OUT_DIR}-legacy"/* "$ROOT_DIR"/
 rm -f fatjar.jar
 (cd "$ROOT_DIR" && zip -qr ../fatjar.jar .)
 

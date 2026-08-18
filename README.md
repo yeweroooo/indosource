@@ -17,7 +17,16 @@ Satu file `indosource.jar` berisi **10 sumber**:
 | Westmanga | v1.westmanga.my | JSON API (signed) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 
-Format plugin: `tsuki` (framework app Usagi), `MangaParserSource` + `MangaParserFactory` digenerate di dalam plugin, di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
+- **tsuki-style** (`tsuki.MangaParserFactoryKt` + `tsuki.model.MangaParserSource`) — app versi tsuki (0.0.32-beta+ / 1.0.0-rc1+)
+- **org.koitharu-style** (`org.koitharu.kotatsu.parsers.MangaParserFactoryKt` + `org.koitharu.kotatsu.parsers.model.MangaParserSource`) — app lama (0.0.31 dan sebelumnya), framework `core-parsers` dibundle penuh di dalam plugin
+
+Struktur source:
+- `src/` — parser tsuki-style (package `org.koitharu.kotatsu.parsers.site.id`)
+- `src-legacy/` — parser org.koitharu-style (package `...site.id.legacy`)
+- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (10 sumber, VORATOON menggantikan KOMIKCAST)
+
+Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
 
 **Voratoon** (`voratoon.id` / `www.voratoon.com`, mirror `v1`/`v2`/`v3.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama. Didukung:
 - Browse + **search** (`?title=`) dan **filter lengkap**: 48 genre (multi-genre), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua), tipe **Project/Mirror**, tag **Hot/Recommended/Anime Adaptation**
@@ -82,15 +91,15 @@ Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan i
 
 ## Build dari kode sumber
 
-Prasyarat: bash, curl, unzip, zip, JDK 17+ (`java` di PATH). Semua dependency (kotlinc, framework `tsuki`, r8/d8, jsoup, okhttp, dll) diunduh otomatis sekali ke `./deps`.
+Prasyarat: bash, curl, unzip, zip, JDK 17+ (`java` di PATH). Semua dependency (kotlinc, framework `tsuki` 1.0.5 + `core-parsers` 0.0.3, r8/d8, jsoup, okhttp, dll) diunduh otomatis sekali ke `./deps`.
 
 ```
 ./build.sh
 ```
 
-Pipeline: `src/*.kt` + `plugin/tsuki/*` → kompilasi kotlinc 2.2.10 (jvm-target 17) → fat jar → dex d8 (min API 24) → `indosource.jar` (zip berisi satu `classes.dex`).
+Pipeline: `src/*.kt` + `src-legacy/*.kt` + `plugin/*` → dua kali kompilasi kotlinc 2.2.10 (tsuki-style + legacy, jvm-target 17) → fat jar (tsuki + core-parsers + dependency) → dex d8 (min API 24) → `indosource.jar` (zip berisi satu `classes.dex`).
 
-Hasilnya `indosource.jar` (~2.2 MB) — file yang sama dengan yang ada di Release.
+Hasilnya `indosource.jar` (~2.3 MB) — file yang sama dengan yang ada di Release.
 
 ---
 
@@ -120,7 +129,9 @@ Aplikasi memuat plugin lewat `PluginClassLoader` dan mencari kelas-kelas ini:
 | `tsuki.MangaParser` | Interface parser (extends `okhttp3.Interceptor`). App meng-proxy semua method; pakai `PagedMangaParser` sebagai base |
 | `tsuki.MangaLoaderContext` | Context yang diberikan app ke parser (httpClient, config, dsb) — jangan di-ship, jangan diimplement |
 
-Kelas parser sendiri boleh di package apa pun — repo ini memakai konvensi `org.koitharu.kotatsu.parsers.site.id` (kompatibel dengan plugin lama). `PluginClassLoader` app mengutamakan kelas `tsuki.*` dari app, dan kelas `org.koitharu.kotatsu.parsers.*` dari plugin dulu — jadi kedua gaya bisa dicampur.
+Untuk kompatibilitas dengan **app versi lama** (sebelum migrasi tsuki, mis. 0.0.31 yang saat ini berstatus "Latest"), plugin juga harus menyediakan varian org.koitharu: `org.koitharu.kotatsu.parsers.model.MangaParserSource` + `org.koitharu.kotatsu.parsers.MangaParserFactoryKt.newParser(...)`, beserta framework `core-parsers` (org.koitharu) dibundle penuh di dalam dex — app lama tidak menyediakannya. App baru (tsuki) memuat varian tsuki; app lama memuat varian org.koitharu (lewat fallback `kotatsuki.*` → `org.koitharu.kotatsu.parsers.*`).
+
+Kelas parser sendiri boleh di package apa pun — repo ini memakai konvensi `org.koitharu.kotatsu.parsers.site.id` (tsuki-style) dan `...site.id.legacy` (org.koitharu-style).
 
 ### 3. Dependency (versi yang dipakai repo ini)
 
@@ -131,6 +142,7 @@ Diperlukan saat **kompilasi** (classpath kotlinc):
 | Dependency | Versi | Sumber |
 |---|---|---|
 | `tsuki` (framework app Usagi) | 1.0.5 | Jitpack `io.github.UsagiApp.Tsuki` |
+| `core-parsers` (framework org.koitharu, untuk varian legacy) | 0.0.3 | Jitpack `com.github.UsagiApp.core-parsers` |
 | `kotlin-compiler-embeddable` | 2.2.10 | Maven Central |
 | `kotlin-stdlib` | 2.2.10 | Maven Central |
 | `jsoup` | 1.17.2 | Maven Central |
@@ -148,12 +160,17 @@ Versi harus selaras dengan app (Kotlin 2.2.x / jvm-target 17) — metadata Kotli
 ### 4. Langkah build (apa yang dilakukan `build.sh`)
 
 ```bash
-# 1) compile — perhatikan -opt-in=tsuki.InternalParsersApi (API tsuki butuh opt-in)
+# 1a) compile tsuki-style — perhatikan -opt-in=tsuki.InternalParsersApi (API tsuki butuh opt-in)
 kotlinc -no-stdlib -no-reflect -opt-in=tsuki.InternalParsersApi \
   -classpath "$FRAMEWORK_CP" -jvm-target 17 -d out \
   src/*.kt plugin/tsuki/model/MangaParserSource.kt plugin/tsuki/MangaParserFactory.kt
 
-# 2) fat jar: kelas hasil compile + isi semua jar dependency
+# 1b) compile legacy (org.koitharu) untuk app lama
+kotlinc -no-stdlib -no-reflect -opt-in=org.koitharu.kotatsu.parsers.InternalParsersApi \
+  -classpath "$LEGACY_CP" -jvm-target 17 -d out-legacy \
+  src-legacy/*.kt plugin/legacy/model/MangaParserSource.kt plugin/legacy/MangaParserFactory.kt
+
+# 2) fat jar: kelas hasil compile + tsuki + core-parsers + semua dependency
 (cd jarroot && zip -qr ../fatjar.jar .)
 
 # 3) dex: min API 24 (sesuai minSdk Usagi)
@@ -166,7 +183,7 @@ d8 --release --min-api 24 --output dexout fatjar.jar
 ### 5. Checklist plugin valid
 
 - [ ] `indosource.jar` berisi **tepat satu file** `classes.dex` di root
-- [ ] Di dex ada `tsuki.model.MangaParserSource` (enum) dan `tsuki.MangaParserFactoryKt.newParser`
+- [ ] Di dex ada `tsuki.model.MangaParserSource` + `tsuki.MangaParserFactoryKt.newParser` (dan varian org.koitharu untuk app lama)
 - [ ] Setiap konstanta enum punya parser nyata di `when(source)` factory
 - [ ] Semua override `MangaParser` diimplement (dengan base `PagedMangaParser` yang jalan)
 - [ ] Tidak ada permission/resources/manifest Android

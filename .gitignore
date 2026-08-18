@@ -1,6 +1,7 @@
 # build artifacts (lihat build.sh)
 deps/
 out/
+out-legacy/
 jarroot/
 dexout/
 fatjar.jar
