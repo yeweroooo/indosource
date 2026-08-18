@@ -1,0 +1,6 @@
+# build artifacts (lihat build.sh)
+deps/
+out/
+jarroot/
+dexout/
+fatjar.jar

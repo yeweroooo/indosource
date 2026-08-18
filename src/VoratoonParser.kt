@@ -8,65 +8,68 @@ import okhttp3.Request
 import okhttp3.Response
 import org.json.JSONArray
 import org.json.JSONObject
-import org.koitharu.kotatsu.parsers.MangaLoaderContext
-import org.koitharu.kotatsu.parsers.config.ConfigKey
-import org.koitharu.kotatsu.parsers.core.PagedMangaParser
-import org.koitharu.kotatsu.parsers.model.ContentRating
-import org.koitharu.kotatsu.parsers.model.ContentType
-import org.koitharu.kotatsu.parsers.model.Manga
-import org.koitharu.kotatsu.parsers.model.MangaChapter
-import org.koitharu.kotatsu.parsers.model.MangaListFilter
-import org.koitharu.kotatsu.parsers.model.MangaListFilterCapabilities
-import org.koitharu.kotatsu.parsers.model.MangaListFilterOptions
-import org.koitharu.kotatsu.parsers.model.MangaPage
-import org.koitharu.kotatsu.parsers.model.MangaParserSource
-import org.koitharu.kotatsu.parsers.model.MangaSource
-import org.koitharu.kotatsu.parsers.model.MangaState
-import org.koitharu.kotatsu.parsers.model.MangaTag
-import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
-import org.koitharu.kotatsu.parsers.model.SortOrder
-import org.koitharu.kotatsu.parsers.network.CommonHeaders
-import org.koitharu.kotatsu.parsers.util.await
-import org.koitharu.kotatsu.parsers.util.generateUid
-import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
-import org.koitharu.kotatsu.parsers.util.parseJson
-import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
+import tsuki.MangaLoaderContext
+import tsuki.config.ConfigKey
+import tsuki.core.PagedMangaParser
+import tsuki.model.ContentRating
+import tsuki.model.ContentType
+import tsuki.model.Manga
+import tsuki.model.MangaChapter
+import tsuki.model.MangaListFilter
+import tsuki.model.MangaListFilterCapabilities
+import tsuki.model.MangaListFilterOptions
+import tsuki.model.MangaPage
+import tsuki.model.MangaParserSource
+import tsuki.model.MangaSource
+import tsuki.model.MangaState
+import tsuki.model.MangaTag
+import tsuki.model.RATING_UNKNOWN
+import tsuki.model.SortOrder
+import tsuki.network.CommonHeaders
+import tsuki.util.await
+import tsuki.util.generateUid
+import tsuki.util.json.getStringOrNull
+import tsuki.util.parseJson
+import tsuki.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.EnumSet
 import java.util.Locale
 
 /**
- * Komikcast (https://be.komikcast.cc, webtree https://komikcast.to — portal that
- * links to v1/v2/v3.komikcast.fit mirrors; komikcast.com / .io are Kominfo-blocked).
- *
- * Custom backend with a JSON API on be.komikcast.cc (the .fit mirrors are the
- * React frontend):
+ * Voratoon (https://www.voratoon.com — portal https://voratoon.id — mirrors
+ * v1/v2/v3.voratoon.com). Successor of the Komikcast backend, same JSON API:
  *  - List: GET /series?page=N&take=12&includeMeta=true
  *  - Search: /series?title={query}
  *  - Filters: /series?genreIds={GenreName}&format=manga|manhwa|manhua
- *    &status=ongoing|completed|hiatus&type=mirror|project&isHot=true&isRecommended=true
- *  - Sort: /series?sort=latest|rating|popularity&sortOrder=asc|desc
+ *    &status=ongoing|completed|hiatus|cancelled&type=mirror|project
+ *    &isHot=true&isRecommended=true&animeAdaptation=true
+ *  - Sort: /series?sort=latest|rating|popularity|updated|views&sortOrder=asc|desc
  *  - Genres: /genres (48 items: id + name — filter by NAME, e.g. genreIds=Action)
  *  - Details: /series/{id} or /series/{slug}
  *  - Chapters: /series/{id}/chapters ; pages: /series/{slug}/chapters/{index}
- *  - Images: minio.imgkc1.my.id (signed covers) and sv1.imgkc1.my.id (chapter pages)
+ *  - Images: cvr.voratoon.id (signed covers) and cdn.voratoon.com (chapter pages)
+ *
+ * Covers manga, manhwa, manhua (donghua via the "Anime Adaptation" tag) —
+ * mirror + project lists, updates, search and all filters are supported.
  */
-public class KomikcastParser(
+public class VoratoonParser(
     context: MangaLoaderContext,
 ) : PagedMangaParser(
     context = context,
-    source = MangaParserSource.KOMIKCAST,
-    pageSize = 12,
+    source = MangaParserSource.VORATOON,
+    pageSize = 24,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
-        "be.komikcast.cc",
-        "v3.komikcast.fit",
-        "komikcast.to",
+        "www.voratoon.com",
+        "v1.voratoon.com",
+        "v2.voratoon.com",
+        "v3.voratoon.com",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
+        SortOrder.ADDED,
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
         SortOrder.RATING,
@@ -74,9 +77,9 @@ public class KomikcastParser(
     )
 
     override val filterCapabilities: MangaListFilterCapabilities = MangaListFilterCapabilities(
-        isMultipleTagsSupported = false,
+        isMultipleTagsSupported = true,
         isSearchSupported = true,
-        isSearchWithFiltersSupported = false,
+        isSearchWithFiltersSupported = true,
     )
 
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
@@ -84,7 +87,7 @@ public class KomikcastParser(
         keys.add(userAgentKey)
     }
 
-    // Reader images on sv1.imgkc1.my.id are hotlink-protected: they return 403
+    // Reader images on cdn.voratoon.com are hotlink-protected: they return 403
     // without a Referer. The app merges getRequestHeaders() into every request
     // for this source (including reader page fetches), so advertise the site
     // referer here — otherwise the chapter pages never load.
@@ -122,10 +125,15 @@ public class KomikcastParser(
             builder.addQueryParameter("title", it)
         }
         filter.tags.forEach { tag ->
-            if (tag.key == PROJECT_TAG_KEY) {
-                builder.addQueryParameter("type", "project")
-            } else if (tag.key.isNotBlank()) {
-                builder.addQueryParameter("genreIds", tag.key)
+            when (tag.key) {
+                PROJECT_TAG_KEY -> builder.addQueryParameter("type", "project")
+                MIRROR_TAG_KEY -> builder.addQueryParameter("type", "mirror")
+                HOT_TAG_KEY -> builder.addQueryParameter("isHot", "true")
+                RECOMMENDED_TAG_KEY -> builder.addQueryParameter("isRecommended", "true")
+                ANIME_TAG_KEY -> builder.addQueryParameter("animeAdaptation", "true")
+                else -> if (tag.key.isNotBlank()) {
+                    builder.addQueryParameter("genreIds", tag.key)
+                }
             }
         }
         filter.types.firstNotNullOfOrNull(::typeToSite)?.let {
@@ -223,12 +231,17 @@ public class KomikcastParser(
             }
         }
         tags.add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
+        tags.add(MangaTag(MIRROR_TAG_TITLE, MIRROR_TAG_KEY, source))
+        tags.add(MangaTag(HOT_TAG_TITLE, HOT_TAG_KEY, source))
+        tags.add(MangaTag(RECOMMENDED_TAG_TITLE, RECOMMENDED_TAG_KEY, source))
+        tags.add(MangaTag(ANIME_TAG_TITLE, ANIME_TAG_KEY, source))
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
             availableStates = EnumSet.of(
                 MangaState.ONGOING,
                 MangaState.FINISHED,
                 MangaState.PAUSED,
+                MangaState.ABANDONED,
             ),
             availableContentTypes = EnumSet.of(
                 ContentType.MANGA,
@@ -250,7 +263,7 @@ public class KomikcastParser(
         val seriesRef = segments[1]
         val seed = Manga(
             id = generateUid(source, "/series/$seriesRef"),
-            title = "Komikcast manga",
+            title = "Voratoon manga",
             altTitles = emptySet(),
             url = "/series/$seriesRef",
             publicUrl = "/series/$seriesRef".toAbsoluteUrl(domain),
@@ -337,6 +350,7 @@ public class KomikcastParser(
     }
 
     private fun orderToQuery(order: SortOrder): Pair<String, String> = when (order) {
+        SortOrder.ADDED -> "updated" to "desc"
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
         -> "popularity" to "desc"
@@ -348,6 +362,7 @@ public class KomikcastParser(
         MangaState.ONGOING -> "ongoing"
         MangaState.FINISHED -> "completed"
         MangaState.PAUSED -> "hiatus"
+        MangaState.ABANDONED -> "cancelled"
         else -> null
     }
 
@@ -418,13 +433,26 @@ public class KomikcastParser(
     private fun fallbackTags(): Set<MangaTag> = buildSet {
         FALLBACK_GENRES.forEach { name -> add(MangaTag(name, name, source)) }
         add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
+        add(MangaTag(MIRROR_TAG_TITLE, MIRROR_TAG_KEY, source))
+        add(MangaTag(HOT_TAG_TITLE, HOT_TAG_KEY, source))
+        add(MangaTag(RECOMMENDED_TAG_TITLE, RECOMMENDED_TAG_KEY, source))
+        add(MangaTag(ANIME_TAG_TITLE, ANIME_TAG_KEY, source))
     }
 
     private companion object {
         private const val PROJECT_TAG_KEY = "project"
         private const val PROJECT_TAG_TITLE = "Project"
+        private const val MIRROR_TAG_KEY = "mirror"
+        private const val MIRROR_TAG_TITLE = "Mirror"
+        private const val HOT_TAG_KEY = "hot"
+        private const val HOT_TAG_TITLE = "Hot"
+        private const val RECOMMENDED_TAG_KEY = "recommended"
+        private const val RECOMMENDED_TAG_TITLE = "Recommended"
+        private const val ANIME_TAG_KEY = "animeAdaptation"
+        private const val ANIME_TAG_TITLE = "Anime Adaptation"
 
         private val DATE_FORMATS = arrayOf(
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
             "yyyy-MM-dd'T'HH:mm:ss",
         )

@@ -10,14 +10,20 @@ Satu file `indosource.jar` berisi **10 sumber**:
 | Shinigami | 11.shinigami.asia | JSON API |
 | Kiryuu | v7.kiryuu.to | HTML + admin-ajax |
 | APKOMIK | 01.apkomik.com | HTML (themesia mangastream) |
-| Komikcast | be.komikcast.cc | JSON API |
+| Voratoon | www.voratoon.com | JSON API (menggantikan Komikcast) |
 | IKIRU | 07.ikiru.wtf | HTML + JSON-LD |
 | Cosmic Toons | 02.cosmicscans.to | JSON API |
 | Komiknesia | v1.komiknesiaku.com | JSON API |
 | Westmanga | v1.westmanga.my | JSON API (signed) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 
-Format plugin: `org.koitharu.kotatsu.parsers` (classic Kotatsu), di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+Format plugin: `tsuki` (framework app Usagi), `MangaParserSource` + `MangaParserFactory` digenerate di dalam plugin, di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+
+**Voratoon** (`voratoon.id` / `www.voratoon.com`, mirror `v1`/`v2`/`v3.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama. Didukung:
+- Browse + **search** (`?title=`) dan **filter lengkap**: 48 genre (multi-genre), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua), tipe **Project/Mirror**, tag **Hot/Recommended/Anime Adaptation**
+- Sort: terbaru, update, popularitas, rating, views
+- Detail: sinopsis, status, rating, genre, daftar chapter lengkap (urutan normal)
+- Reader: halaman dari `cdn.voratoon.com`, cover dari `cvr.voratoon.id` (URL presigned)
 
 ---
 
@@ -67,7 +73,7 @@ Catatan: beberapa situs butuh koneksi internet normal dari Indonesia (beberapa d
 1. **Tidak ada akses ke data pribadi.** Plugin hanya membaca halaman web / API publik situs manga. Tidak ada permission Android tambahan selain internet, tidak ada telemetri, tidak ada tracker, tidak ada akses file/telepon/kontak.
 2. **Kode sumber terbuka.** Seluruh kode parser ada di folder [`src/`](src/) — siapa pun bisa mengauditnya.
 3. **Rilis transparan.** File `indosource.jar` di setiap Release dibuat dari kode di `src/` (Kotlin → fat jar → dex dengan d8). Tidak ada binary tersembunyi.
-4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, dll). Tidak ada domain lain.
+4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, cdn.voratoon.com, cvr.voratoon.id, dll). Tidak ada domain lain.
 5. **Berjalan di sandbox plugin.** Jar dimuat lewat PluginClassLoader aplikasi sebagai plugin, bukan aplikasi mandiri; aplikasi yang mengatur batasannya.
 
 Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan install jar yang dibagikan orang lain di sembarang tempat.
@@ -76,17 +82,103 @@ Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan i
 
 ## Build dari kode sumber
 
-Prasyarat: JDK 11+, Android SDK build-tools (d8), framework `kotatsu-core` (kotatsu-parsers 1.0.5).
+Prasyarat: bash, curl, unzip, zip, JDK 17+ (`java` di PATH). Semua dependency (kotlinc, framework `tsuki`, r8/d8, jsoup, okhttp, dll) diunduh otomatis sekali ke `./deps`.
 
 ```
-# 1) compile + fat jar (Kotlin, jsoup, okhttp, okio, coroutines, org.json)
-gradle buildJar
-
-# 2) dex untuk Android (min API 24)
-d8 --release --lib $ANDROID_HOME/platforms/android-35/android.jar --min-api 24 plugin.jar --output indosource.jar
+./build.sh
 ```
 
-Hasilnya `indosource.jar` (~2.0 MB) — file yang sama dengan yang ada di Release.
+Pipeline: `src/*.kt` + `plugin/tsuki/*` → kompilasi kotlinc 2.2.10 (jvm-target 17) → fat jar → dex d8 (min API 24) → `indosource.jar` (zip berisi satu `classes.dex`).
+
+Hasilnya `indosource.jar` (~2.2 MB) — file yang sama dengan yang ada di Release.
+
+---
+
+## Cara membuat plugin Usagi yang valid
+
+Dokumentasi ini hasil reverse-engineering format plugin Usagi (app versi Tsuki, framework `tsuki` 1.0.5). Repo ini adalah contoh yang berjalan penuh.
+
+### 1. Format file
+
+Plugin Usagi bukan APK — dia **jar biasa yang isinya cuma satu file `classes.dex`** di root (tanpa `META-INF`, tanpa manifest, tanpa resources):
+
+```
+indosource.jar
+└── classes.dex        # hasil d8, min API 24
+```
+
+> Jangan pakai `jar cf` langsung ke directory hasil compile — itu menghasilkan `META-INF/MANIFEST.MF` tambahan. Build memakai `zip` murni (lihat `build.sh`). `zip` juga **tidak menghapus entri lama** saat menimpa — selalu `rm` dulu.
+
+### 2. Yang wajib ada di dalam dex (kontrak plugin)
+
+Aplikasi memuat plugin lewat `PluginClassLoader` dan mencari kelas-kelas ini:
+
+| Kelas | Fungsi |
+|---|---|
+| `tsuki.model.MangaParserSource` | **Enum wajib di-ship oleh plugin** (tidak ada di framework). Setiap konstanta enum = satu sumber yang muncul di daftar Sources. Konstruktor: `(title, locale, contentType, isBroken)` dan harus implement `tsuki.model.MangaSource` |
+| `tsuki.MangaParserFactoryKt.newParser(MangaParserSource, MangaLoaderContext): MangaParser` | Factory berisi `when(source)` → instance parser, dibungkus `MangaParserWrapper(parser)`, lalu `check(parser.source == source)` |
+| `tsuki.MangaParser` | Interface parser (extends `okhttp3.Interceptor`). App meng-proxy semua method; pakai `PagedMangaParser` sebagai base |
+| `tsuki.MangaLoaderContext` | Context yang diberikan app ke parser (httpClient, config, dsb) — jangan di-ship, jangan diimplement |
+
+Kelas parser sendiri boleh di package apa pun — repo ini memakai konvensi `org.koitharu.kotatsu.parsers.site.id` (kompatibel dengan plugin lama). `PluginClassLoader` app mengutamakan kelas `tsuki.*` dari app, dan kelas `org.koitharu.kotatsu.parsers.*` dari plugin dulu — jadi kedua gaya bisa dicampur.
+
+### 3. Dependency (versi yang dipakai repo ini)
+
+Framework & library **TIDAK perlu di-ship** — app sudah menyediakan tsuki/jsoup/okhttp/dll dan loader selalu mengutamakan kelas app. Tapi `build.sh` tetap menggabungkannya ke fat jar supaya plugin tetap jalan jika suatu saat app mengubah versi dependency (inert, tidak dipakai app).
+
+Diperlukan saat **kompilasi** (classpath kotlinc):
+
+| Dependency | Versi | Sumber |
+|---|---|---|
+| `tsuki` (framework app Usagi) | 1.0.5 | Jitpack `io.github.UsagiApp.Tsuki` |
+| `kotlin-compiler-embeddable` | 2.2.10 | Maven Central |
+| `kotlin-stdlib` | 2.2.10 | Maven Central |
+| `jsoup` | 1.17.2 | Maven Central |
+| `okhttp` | 5.3.2 | Maven Central |
+| `okio-jvm` | 3.17.0 | Maven Central |
+| `org.json` | 20251224 | Maven Central |
+| `kotlinx-coroutines-core-jvm` | 1.10.2 | Maven Central |
+| `kotlinx-serialization-json/core-jvm` | 1.11.0 | Maven Central |
+| `androidx.collection:collection-jvm` | 1.6.0 | Google Maven |
+| `r8` (d8) | 8.13.22 | Google Maven |
+| `org.jetbrains:annotations` | 24.1.0 | Maven Central |
+
+Versi harus selaras dengan app (Kotlin 2.2.x / jvm-target 17) — metadata Kotlin yang lebih baru dari stdlib app akan ditolak saat load.
+
+### 4. Langkah build (apa yang dilakukan `build.sh`)
+
+```bash
+# 1) compile — perhatikan -opt-in=tsuki.InternalParsersApi (API tsuki butuh opt-in)
+kotlinc -no-stdlib -no-reflect -opt-in=tsuki.InternalParsersApi \
+  -classpath "$FRAMEWORK_CP" -jvm-target 17 -d out \
+  src/*.kt plugin/tsuki/model/MangaParserSource.kt plugin/tsuki/MangaParserFactory.kt
+
+# 2) fat jar: kelas hasil compile + isi semua jar dependency
+(cd jarroot && zip -qr ../fatjar.jar .)
+
+# 3) dex: min API 24 (sesuai minSdk Usagi)
+d8 --release --min-api 24 --output dexout fatjar.jar
+
+# 4) bungkus ulang: classes.dex -> indosource.jar (HANYA file ini)
+(cd dexout && zip -q ../indosource.jar classes.dex)
+```
+
+### 5. Checklist plugin valid
+
+- [ ] `indosource.jar` berisi **tepat satu file** `classes.dex` di root
+- [ ] Di dex ada `tsuki.model.MangaParserSource` (enum) dan `tsuki.MangaParserFactoryKt.newParser`
+- [ ] Setiap konstanta enum punya parser nyata di `when(source)` factory
+- [ ] Semua override `MangaParser` diimplement (dengan base `PagedMangaParser` yang jalan)
+- [ ] Tidak ada permission/resources/manifest Android
+- [ ] Jaringan hanya ke domain sumber + CDN-nya
+
+Verifikasi cepat dengan jadx:
+
+```
+jadx -d /tmp/verify indosource.jar
+grep -r "VORATOON" /tmp/verify/sources/tsuki/model/MangaParserSource.java   # enum ada
+grep -n "newParser" /tmp/verify/sources/tsuki/MangaParserFactoryKt.java     # factory ada
+```
 
 ---
 
