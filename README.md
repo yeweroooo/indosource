@@ -2,7 +2,7 @@
 
 Plugin sumber manga Indonesia untuk aplikasi baca manga **Usagi** (dan aplikasi berbasis Kotatsu).
 
-Satu file `indosource.jar` berisi **10 sumber**:
+Satu file `indosource.jar` berisi **11 sumber**:
 
 | Sumber | Domain utama | Teknik |
 |---|---|---|
@@ -16,6 +16,7 @@ Satu file `indosource.jar` berisi **10 sumber**:
 | Komiknesia | v1.komiknesiaku.com | JSON API |
 | Westmanga | v1.westmanga.my | JSON API (signed) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
+| LumosKomik | 03.lumosgg.com | HTML (Astro SSR) |
 
 Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 - **tsuki-style** (`tsuki.MangaParserFactoryKt` + `tsuki.model.MangaParserSource`) — app versi tsuki (0.0.32-beta+ / 1.0.0-rc1+)
@@ -24,9 +25,16 @@ Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 Struktur source:
 - `src/` — parser tsuki-style (package `org.koitharu.kotatsu.parsers.site.id`)
 - `src-legacy/` — parser org.koitharu-style (package `...site.id.legacy`)
-- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (10 sumber, VORATOON menggantikan KOMIKCAST)
+- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (11 sumber, VORATOON menggantikan KOMIKCAST)
 
 Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+
+**LumosKomik** (`03.lumosgg.com`, portal `lumosgg.com`) — situs Astro SSR, semua fitur jalan lewat HTTP murni:
+- Browse + **search** (`?q=`) + **filter**: 185+ genre (**multi-genre**, dipisah koma → interseksi server-side), status (ongoing/completed/hiatus), tipe (manga/manhwa/manhua)
+- Sort: terbaru, populer, rating, A-Z
+- Detail: sinopsis (schema.org JSON-LD), author, rating, genre, status, daftar chapter lengkap
+- Reader: halaman dari `lms.imgsvr.my.id`
+- Catatan: situs menanam **honeypot trap** (`/comic/honeypot-trap-*` yang mengarah ke `/api/honeypot/trap`, memban IP pengunjung) — parser memfilter slug ini sehingga tidak pernah dikunjungi
 
 **Voratoon** (`voratoon.id` / `www.voratoon.com`, mirror `v1`/`v2`/`v3.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama. Didukung:
 - Browse + **search** (`?title=`) dan **filter lengkap**: 48 genre (multi-genre), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua), tipe **Project/Mirror**, tag **Hot/Recommended/Anime Adaptation**
@@ -82,7 +90,7 @@ Catatan: beberapa situs butuh koneksi internet normal dari Indonesia (beberapa d
 1. **Tidak ada akses ke data pribadi.** Plugin hanya membaca halaman web / API publik situs manga. Tidak ada permission Android tambahan selain internet, tidak ada telemetri, tidak ada tracker, tidak ada akses file/telepon/kontak.
 2. **Kode sumber terbuka.** Seluruh kode parser ada di folder [`src/`](src/) — siapa pun bisa mengauditnya.
 3. **Rilis transparan.** File `indosource.jar` di setiap Release dibuat dari kode di `src/` (Kotlin → fat jar → dex dengan d8). Tidak ada binary tersembunyi.
-4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, cdn.voratoon.com, cvr.voratoon.id, dll). Tidak ada domain lain.
+4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, cdn.voratoon.com, cvr.voratoon.id, lms.imgsvr.my.id, dll). Tidak ada domain lain.
 5. **Berjalan di sandbox plugin.** Jar dimuat lewat PluginClassLoader aplikasi sebagai plugin, bukan aplikasi mandiri; aplikasi yang mengatur batasannya.
 
 Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan install jar yang dibagikan orang lain di sembarang tempat.
