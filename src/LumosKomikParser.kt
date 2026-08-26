@@ -384,6 +384,9 @@ public class LumosKomikParser(
         val clean = raw.trim().substringBefore(' ').takeIf(String::isNotBlank) ?: return null
         if (clean.startsWith("data:", ignoreCase = true)) return null
         if (clean.startsWith("//")) return "https:$clean"
+        // Root-relative hrefs (e.g. /read/{slug}/chapter-N) — toHttpUrlOrNull
+        // rejects them, which previously dropped every chapter from the list.
+        if (clean.startsWith("/")) return "https://$domain$clean"
         return clean.toHttpUrlOrNull()?.toString()
             ?: clean.takeIf { it.startsWith("http", ignoreCase = true) }
     }
