@@ -81,7 +81,7 @@ rm -f "$ROOT_DIR"/META-INF/*.SF "$ROOT_DIR"/META-INF/*.DSA "$ROOT_DIR"/META-INF/
 cp -r "$OUT_DIR"/* "$ROOT_DIR"/
 cp -r "${OUT_DIR}-legacy"/* "$ROOT_DIR"/
 rm -f fatjar.jar
-(cd "$ROOT_DIR" && zip -qr ../fatjar.jar .)
+(cd "$ROOT_DIR" && if command -v zip >/dev/null; then zip -qr ../fatjar.jar .; else jar -cMf ../fatjar.jar .; fi)
 
 # --- 4) dex (d8, min API 24) ---
 rm -rf "$DEX_DIR"
@@ -91,7 +91,7 @@ java -Xmx3g -cp "$DEP_DIR/r8.jar" com.android.tools.r8.D8 \
 
 # --- 5) bungkus: indosource.jar = zip berisi classes.dex (format plugin Usagi) ---
 rm -f indosource.jar
-(cd "$DEX_DIR" && zip -q ../indosource.jar classes.dex)
+(cd "$DEX_DIR" && if command -v zip >/dev/null; then zip -q ../indosource.jar classes.dex; else python3 -c "import zipfile; z=zipfile.ZipFile('../indosource.jar', 'w', zipfile.ZIP_DEFLATED); z.write('classes.dex'); z.close()"; fi)
 
 # --- 6) verifikasi ---
 echo "== indosource.jar =="

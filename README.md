@@ -11,7 +11,7 @@ Satu file `indosource.jar` berisi **11 sumber**:
 | Kiryuu | v7.kiryuu.to | HTML + admin-ajax |
 | APKOMIK | 01.apkomik.com | HTML (themesia mangastream) |
 | Voratoon | api.voratoon.com | JSON API (menggantikan Komikcast) |
-| IKIRU | 07.ikiru.wtf | HTML + JSON-LD |
+| IKIRU | 09.ikiru.wtf | JSON API + HTML |
 | Cosmic Toons | 02.cosmicscans.to | JSON API |
 | Komiknesia | v1.komiknesiaku.com | JSON API |
 | Westmanga | v1.westmanga.my | JSON API (signed) |

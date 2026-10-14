@@ -1,12 +1,12 @@
 package org.koitharu.kotatsu.parsers.site.id
 
-import okhttp3.FormBody
 import okhttp3.Headers
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
+import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import org.jsoup.nodes.Element
 import tsuki.MangaLoaderContext
@@ -32,6 +32,7 @@ import tsuki.util.attrOrNull
 import tsuki.util.await
 import tsuki.util.generateUid
 import tsuki.util.parseHtml
+import tsuki.util.parseJson
 import tsuki.util.textOrNull
 import tsuki.util.toAbsoluteUrl
 import tsuki.util.toRelativeUrl
@@ -41,45 +42,46 @@ import java.util.EnumSet
 import java.util.Locale
 
 /**
- * IKIRU (https://07.ikiru.wtf, webtree https://ikiru.id — a portal that links to
- * the current mirror; ikiru.id -> 05.ikiru.wtf -> 06 (ISP-blocked) -> 07.ikiru.wtf).
+ * IKIRU (portal https://ikiru.id, current mirror https://09.ikiru.wtf).
  *
- * WordPress + custom "readerkiru" theme (Tailwind + htmx), very similar to Kiryuu:
- *  - Browse: GET /manga/?the_page=N&the_genre={slugs}&the_status=&the_type=
- *    &orderby=date|title|popular|rating&order=asc|desc&project=1
- *  - Search + filters: POST wp-admin/admin-ajax.php?action=advanced_search (no nonce)
- *    FormData: page, query={title}, genre=["slug"..], status=[..], type=[..],
- *              orderby, order, project
- *  - Details: /manga/{slug}/ via embedded schema.org ComicSeries JSON-LD +
- *    #chapter-list div[data-chapter-number]
- *  - Reader: /manga/{slug}/chapter-{n}.{id}/ -> section[data-image-data="1"] img
- *  - Genres: 200 terms in `var searchTerms = {...}` on /advanced-search/ (dedupe by slug)
+ * Migrated from WordPress to Nuxt SSR + REST API:
+ *  - Browse / Search / Filters: GET /api/public/library/search
+ *    query params: page, query, sortBy (popular|updated|title|rating|created),
+ *    sort (asc|desc), type (MANGA|MANHWA|MANHUA), status (ONGOING|COMPLETED),
+ *    genre (UUID genre id, repeatable)
+ *  - Details: GET /api/public/manga/{slug} (JSON API) with HTML fallback (/manga/{slug}/)
+ *  - Chapters: data.chapters.chapters -> /manga/{slug}/chapter-{num}
+ *  - Reader: GET /manga/{slug}/chapter-{num} -> .rpage img
+ *  - Genres: GET /api/user/genres -> data.allGenres (name, id, slug)
  */
 public class IkiruParser(
     context: MangaLoaderContext,
 ) : PagedMangaParser(
     context = context,
     source = MangaParserSource.IKIRU,
-    pageSize = 24,
+    pageSize = 21,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
-        "07.ikiru.wtf",
+        "09.ikiru.wtf",
         "ikiru.id",
+        "08.ikiru.wtf",
+        "07.ikiru.wtf",
         "05.ikiru.wtf",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
         SortOrder.UPDATED,
-        SortOrder.ALPHABETICAL,
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
+        SortOrder.ALPHABETICAL,
         SortOrder.RATING,
+        SortOrder.NEWEST,
     )
 
     override val filterCapabilities: MangaListFilterCapabilities = MangaListFilterCapabilities(
         isMultipleTagsSupported = true,
         isSearchSupported = true,
-        isSearchWithFiltersSupported = false,
+        isSearchWithFiltersSupported = true,
     )
 
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
@@ -92,44 +94,203 @@ public class IkiruParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val query = filter.query?.takeIf(String::isNotBlank)
-        val document = if (query != null) {
-            searchAdvanced(page, order, filter, query)
-        } else {
-            browseArchive(page, order, filter)
+        val builder = "${baseUrl()}api/public/library/search".toHttpUrlOrNull()!!.newBuilder()
+        builder.addQueryParameter("page", page.toString())
+
+        val (sortBy, sortDir) = orderToQuery(order)
+        builder.addQueryParameter("sortBy", sortBy)
+        builder.addQueryParameter("sort", sortDir)
+
+        filter.query?.takeIf(String::isNotBlank)?.let { query ->
+            builder.addQueryParameter("query", query.trim())
         }
-        return document.select(CARD_SELECTOR)
-            .mapNotNull(::parseMangaCard)
-            .distinctBy { it.url }
+
+        filter.types.firstNotNullOfOrNull(::typeToSite)?.let {
+            builder.addQueryParameter("type", it)
+        }
+
+        filter.states.firstNotNullOfOrNull(::stateToSite)?.let {
+            builder.addQueryParameter("status", it)
+        }
+
+        for (tag in filter.tags) {
+            val genreId = resolveGenreId(tag.key)
+            if (genreId.isNotBlank()) {
+                builder.addQueryParameter("genre", genreId)
+            }
+        }
+
+        val json = getJson(builder.build().toString())
+        val mangasArray = json.optJSONObject("data")?.optJSONArray("mangas") ?: return emptyList()
+
+        val result = ArrayList<Manga>(mangasArray.length())
+        for (i in 0 until mangasArray.length()) {
+            val item = mangasArray.optJSONObject(i) ?: continue
+            val slug = item.optString("slug").takeIf(String::isNotBlank) ?: continue
+            val title = item.optString("title").ifBlank { titleFromUrl(slug) }
+            val cover = item.optString("featuredImage").takeIf(String::isNotBlank)
+            val relativeUrl = "/manga/$slug/"
+            val score = item.optJSONObject("metadata")?.optDouble("score")?.toFloat() ?: 0f
+            val rating = if (score > 0f) (score / 10f).coerceIn(0f, 1f) else RATING_UNKNOWN
+
+            result.add(
+                Manga(
+                    id = generateUid(source, relativeUrl),
+                    title = title,
+                    altTitles = emptySet(),
+                    url = relativeUrl,
+                    publicUrl = relativeUrl.toAbsoluteUrl(domain),
+                    rating = rating,
+                    contentRating = sourceContentRating,
+                    coverUrl = cover,
+                    tags = emptySet(),
+                    state = null,
+                    authors = emptySet(),
+                    source = source,
+                )
+            )
+        }
+        return result
     }
 
     override suspend fun getDetails(manga: Manga): Manga {
-        val mangaUrl = manga.url.toAbsoluteUrl(domain).substringBefore("?").removeSuffix("/")
-        val document = getHtml(mangaUrl, documentHeaders(mangaUrl))
+        val slug = manga.url.split('/').filter(String::isNotBlank).lastOrNull() ?: return manga
 
-        // schema.org JSON-LD (ComicSeries) carries title/synopsis/author/genres/status.
-        val ld = parseSchemaJsonLd(document)
-        val title = ld?.optString("name")?.ifBlank { manga.title } ?: manga.title
-        // JSON-LD description may contain HTML entities (&#8220; etc.) — decode them.
-        val description = ld?.optString("description")
-            ?.takeIf(String::isNotBlank)
-            ?.let { org.jsoup.parser.Parser.unescapeEntities(it, false) }
-            ?: manga.description
-        val authors = parseAuthors(ld)
-        val tags = parseGenres(document, ld)
-        val state = parseState(ld?.optString("creativeWorkStatus"))
-        val altTitles = emptySet<String>()
-        val rating = parseRating(document)
-        val coverUrl = document.selectFirst("meta[property=\"og:image\"]")?.attrOrNull("content")
-            ?: document.selectFirst("img[itemprop=image]")?.let(::imageFromElement)
-            ?: manga.coverUrl
-        val chapters = document.select("#chapter-list div[data-chapter-number], .chapter-list div[data-chapter]")
-            .mapNotNull(::chapterFromElement)
-            .sortedBy { it.number }
+        return runCatching {
+            getDetailsFromApi(manga, slug)
+        }.getOrElse {
+            getDetailsFromHtml(manga, slug)
+        }
+    }
+
+    private suspend fun getDetailsFromApi(manga: Manga, slug: String): Manga {
+        val json = getJson("${baseUrl()}api/public/manga/$slug")
+        val data = json.optJSONObject("data") ?: throw IllegalStateException("Empty manga data")
+
+        val title = data.optString("title").ifBlank { manga.title }
+        val descRaw = data.optString("description")
+        val description = if (descRaw.isNotBlank()) {
+            Jsoup.parse(descRaw).text()
+        } else {
+            manga.description
+        }
+        val coverUrl = data.optString("featuredImage").takeIf(String::isNotBlank) ?: manga.coverUrl
+        val state = parseState(data.optString("status")) ?: manga.state
+
+        val meta = data.optJSONObject("metadata")
+        val score = meta?.optDouble("score")?.toFloat() ?: 0f
+        val rating = if (score > 0f) (score / 10f).coerceIn(0f, 1f) else manga.rating
+
+        val altTitles = buildSet {
+            meta?.optJSONArray("alternateTitles")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val t = arr.optString(i).trim()
+                    if (t.isNotEmpty()) add(t)
+                }
+            }
+        }
+
+        val authors = buildSet {
+            meta?.optJSONArray("author")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.optString("name")?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+            meta?.optJSONArray("artist")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    arr.optJSONObject(i)?.optString("name")?.takeIf(String::isNotBlank)?.let(::add)
+                }
+            }
+        }
+
+        val tags = buildSet {
+            meta?.optJSONArray("genre")?.let { arr ->
+                for (i in 0 until arr.length()) {
+                    val g = arr.optJSONObject(i) ?: continue
+                    val name = g.optString("name").trim()
+                    val id = g.optString("id").trim()
+                    if (name.isNotEmpty() && id.isNotEmpty()) {
+                        add(MangaTag(name, id, source))
+                    }
+                }
+            }
+        }
+
+        val chaptersList = mutableListOf<MangaChapter>()
+        val chaptersObj = data.optJSONObject("chapters")
+        val chaptersArr = chaptersObj?.optJSONArray("chapters")
+        if (chaptersArr != null) {
+            for (i in 0 until chaptersArr.length()) {
+                val c = chaptersArr.optJSONObject(i) ?: continue
+                val chNumber = c.optDouble("number", 0.0).toFloat()
+                val chTitle = c.optString("title").trim()
+                val numStr = formatChapterNumber(chNumber)
+                val relativeUrl = "/manga/$slug/chapter-$numStr"
+                val createdAt = c.optString("createdAt")
+                chaptersList.add(
+                    MangaChapter(
+                        id = generateUid(source, relativeUrl),
+                        title = if (chTitle.isNotBlank()) chTitle else "Chapter $numStr",
+                        number = chNumber,
+                        volume = 0,
+                        url = relativeUrl,
+                        scanlator = null,
+                        uploadDate = parseIsoDate(createdAt),
+                        branch = null,
+                        source = source,
+                    )
+                )
+            }
+        }
+        chaptersList.sortBy { it.number }
 
         return manga.copy(
             title = title,
             altTitles = altTitles,
+            rating = rating.takeUnless { it == RATING_UNKNOWN } ?: manga.rating,
+            contentRating = sourceContentRating,
+            coverUrl = coverUrl,
+            largeCoverUrl = coverUrl,
+            tags = tags.ifEmpty { manga.tags },
+            state = state ?: manga.state,
+            authors = authors.ifEmpty { manga.authors },
+            description = description,
+            chapters = chaptersList,
+        )
+    }
+
+    private suspend fun getDetailsFromHtml(manga: Manga, slug: String): Manga {
+        val mangaUrl = "${baseUrl()}manga/$slug"
+        val document = getHtml(mangaUrl, documentHeaders(mangaUrl))
+
+        val ld = parseSchemaJsonLd(document)
+        val title = ld?.optString("name")?.ifBlank {
+            document.selectFirst("h1")?.textOrNull() ?: manga.title
+        } ?: manga.title
+
+        val description = ld?.optString("description")
+            ?.takeIf(String::isNotBlank)
+            ?.let { org.jsoup.parser.Parser.unescapeEntities(it, false) }
+            ?: document.selectFirst("meta[property=\"og:description\"]")?.attrOrNull("content")
+            ?: manga.description
+
+        val authors = parseAuthors(ld)
+        val tags = parseGenres(document, ld)
+        val state = parseState(ld?.optString("creativeWorkStatus")) ?: manga.state
+
+        val rating = parseRating(document, ld)
+        val coverUrl = document.selectFirst("meta[property=\"og:image\"]")?.attrOrNull("content")
+            ?: document.selectFirst(".detail-cover img, img[itemprop=image]")?.let(::imageFromElement)
+            ?: manga.coverUrl
+
+        val chapters = document.select(".clist a.crow, .clist-items a.crow, a[class*=crow]")
+            .mapNotNull { chapterFromElement(it, slug) }
+            .distinctBy { it.url }
+            .sortedBy { it.number }
+
+        return manga.copy(
+            title = title,
+            altTitles = emptySet(),
             rating = rating.takeUnless { it == RATING_UNKNOWN } ?: manga.rating,
             contentRating = sourceContentRating,
             coverUrl = coverUrl,
@@ -164,41 +325,30 @@ public class IkiruParser(
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
         runCatching {
-            val url = "${baseUrl()}advanced-search/"
-            val document = getHtml(url, documentHeaders(url))
-            val script = document.select("script").firstOrNull { it.data().contains("var searchTerms = ") }?.data()
-                ?: return@runCatching
-            val start = script.indexOf("var searchTerms = ")
-            if (start < 0) return@runCatching
-            val jsonStart = start + "var searchTerms = ".length
-            val jsonEnd = script.indexOf("};", jsonStart)
-            if (jsonEnd < 0) return@runCatching
-            val terms = runCatching { JSONObject(script.substring(jsonStart, jsonEnd + 1)) }.getOrNull()
-                ?: return@runCatching
-            val genres = terms.optJSONObject("genre") ?: return@runCatching
-            val seen = HashSet<String>()
-            for (key in genres.keys()) {
-                val item = genres.optJSONObject(key) ?: continue
-                val name = item.optString("name").trim()
-                val slug = item.optString("slug").trim()
-                if (name.isEmpty() || slug.isEmpty()) continue
-                if (!seen.add(slug)) continue
-                tags.add(MangaTag(name, slug, source))
+            val url = "${baseUrl()}api/user/genres"
+            val json = getJson(url)
+            val allGenres = json.optJSONObject("data")?.optJSONArray("allGenres")
+            if (allGenres != null) {
+                for (i in 0 until allGenres.length()) {
+                    val item = allGenres.optJSONObject(i) ?: continue
+                    val name = item.optString("name").trim()
+                    val id = item.optString("id").trim()
+                    if (name.isNotEmpty() && id.isNotEmpty()) {
+                        tags.add(MangaTag(name, id, source))
+                    }
+                }
             }
         }
-        tags.add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
             availableStates = EnumSet.of(
                 MangaState.ONGOING,
                 MangaState.FINISHED,
-                MangaState.PAUSED,
             ),
             availableContentTypes = EnumSet.of(
                 ContentType.MANGA,
                 ContentType.MANHWA,
                 ContentType.MANHUA,
-                ContentType.COMICS,
             ),
             availableContentRating = EnumSet.of(ContentRating.SAFE, ContentRating.SUGGESTIVE, ContentRating.ADULT),
             availableLocales = setOf(Locale("id")),
@@ -229,108 +379,42 @@ public class IkiruParser(
         return getDetails(seed)
     }
 
-    private suspend fun browseArchive(
-        page: Int,
-        order: SortOrder,
-        filter: MangaListFilter,
-    ): Document {
-        // IKIRU ignores query-based pagination (?the_page/N); use the WordPress
-        // path style /manga/page/N/ for page 2+ (page 1 = /manga/).
-        val base = if (page > 1) "${baseUrl()}manga/page/$page/" else "${baseUrl()}manga/"
-        val builder = base.toHttpUrlOrNull()!!.newBuilder()
-        builder.addQueryParameter("orderby", orderToQuery(order).first)
-        builder.addQueryParameter("order", orderToQuery(order).second)
-        val genreSlugs = filter.tags
-            .filterNot { it.key == PROJECT_TAG_KEY }
-            .map { it.key }
-        if (genreSlugs.isNotEmpty()) builder.addQueryParameter("the_genre", genreSlugs.joinToString(","))
-        filter.states.firstNotNullOfOrNull(::stateToSite)?.let { builder.addQueryParameter("the_status", it) }
-        filter.types.firstNotNullOfOrNull(::typeToSite)?.let { builder.addQueryParameter("the_type", it) }
-        if (filter.tags.any { it.key == PROJECT_TAG_KEY }) builder.addQueryParameter("project", "1")
-        return getHtml(builder.build().toString(), documentHeaders(baseUrl()))
-    }
-
-    private suspend fun searchAdvanced(
-        page: Int,
-        order: SortOrder,
-        filter: MangaListFilter,
-        query: String,
-    ): Document {
-        val form = FormBody.Builder()
-            .add("page", page.toString())
-            .add("query", query)
-        val (orderby, orderVal) = orderToQuery(order)
-        form.add("orderby", orderby)
-        form.add("order", orderVal)
-        if (filter.tags.any { it.key == PROJECT_TAG_KEY }) form.add("project", "1")
-        val genres = filter.tags.filterNot { it.key == PROJECT_TAG_KEY }.map { it.key }
-        if (genres.isNotEmpty()) form.add("genre", JSONArrayOfStrings(genres))
-        filter.states.firstNotNullOfOrNull(::stateToSite)?.let { form.add("status", "[\"$it\"]") }
-        filter.types.firstNotNullOfOrNull(::typeToSite)?.let { form.add("type", "[\"$it\"]") }
-        return postHtml(adminAjaxUrl("advanced_search"), form.build(), ajaxHeaders())
-    }
-
-    private fun JSONArrayOfStrings(values: List<String>): String =
-        values.joinToString(",", "[", "]") { "\"$it\"" }
-
     private fun orderToQuery(order: SortOrder): Pair<String, String> = when (order) {
         SortOrder.ALPHABETICAL -> "title" to "asc"
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
         -> "popular" to "desc"
         SortOrder.RATING -> "rating" to "desc"
-        else -> "date" to "desc"
+        SortOrder.NEWEST -> "created" to "desc"
+        else -> "updated" to "desc"
     }
 
     private fun stateToSite(state: MangaState): String? = when (state) {
-        MangaState.ONGOING -> "ongoing"
-        MangaState.FINISHED -> "completed"
-        MangaState.PAUSED -> "on-hiatus"
-        MangaState.ABANDONED -> "cancelled"
+        MangaState.ONGOING -> "ONGOING"
+        MangaState.FINISHED -> "COMPLETED"
         else -> null
     }
 
     private fun typeToSite(type: ContentType): String? = when (type) {
-        ContentType.MANGA -> "manga"
-        ContentType.MANHWA -> "manhwa"
-        ContentType.MANHUA -> "manhua"
-        ContentType.COMICS -> "comic"
+        ContentType.MANGA -> "MANGA"
+        ContentType.MANHWA -> "MANHWA"
+        ContentType.MANHUA -> "MANHUA"
         else -> null
     }
 
-    private fun parseMangaCard(element: Element): Manga? {
-        val link = element.select("a[href]").firstOrNull { mangaRelativeUrl(it.attr("href")) != null }
-            ?: return null
-        val relativeUrl = mangaRelativeUrl(link.attr("href")) ?: return null
-        val title = element.selectFirst("h1[class*=line-clamp-2], a[title], .title, div.tt")?.textOrNull()
-            ?: element.selectFirst("img")?.attrOrNull("alt")
+    private fun chapterFromElement(element: Element, mangaSlug: String): MangaChapter? {
+        val link = if (element.`is`("a[href]")) element else element.selectFirst("a[href]") ?: return null
+        val href = link.attr("href").trim()
+        val relativeUrl = href.toRelativeUrl(domain)
+        val title = element.selectFirst(".cnum")?.textOrNull()
+            ?: link.selectFirst("span, p")?.textOrNull()
+            ?: link.textOrNull()
             ?: titleFromUrl(relativeUrl)
-        val cover = element.selectFirst("img.wp-post-image, img[itemprop=image]")?.let(::imageFromElement)
-
-        return Manga(
-            id = generateUid(source, relativeUrl),
-            title = title,
-            altTitles = emptySet(),
-            url = relativeUrl,
-            publicUrl = relativeUrl.toAbsoluteUrl(domain),
-            rating = parseRating(element),
-            contentRating = sourceContentRating,
-            coverUrl = cover,
-            tags = emptySet(),
-            state = parseState(element.selectText(".text-accent, .status, span[class*=status]")),
-            authors = emptySet(),
-            source = source,
-        )
-    }
-
-    private fun chapterFromElement(element: Element): MangaChapter? {
-        val link = element.selectFirst("a[href]") ?: return null
-        val absoluteUrl = link.attrAsAbsoluteUrl("href") ?: return null
-        val relativeUrl = absoluteUrl.toRelativeUrl(domain)
-        val title = link.selectFirst("span, p")?.textOrNull() ?: titleFromUrl(relativeUrl)
         val number = parseChapterNumber(if (title.isBlank()) relativeUrl else title)
-        val uploadDate = element.selectFirst("time")?.attrOrNull("datetime")
+        val dateText = element.selectFirst(".cdate")?.textOrNull()
+            ?: element.selectFirst("time")?.attrOrNull("datetime")
             ?: element.selectFirst("time")?.textOrNull()
+
         return MangaChapter(
             id = generateUid(source, relativeUrl),
             title = title,
@@ -338,16 +422,13 @@ public class IkiruParser(
             volume = 0,
             url = relativeUrl,
             scanlator = null,
-            uploadDate = parseChapterDate(uploadDate),
+            uploadDate = parseRelativeOrDate(dateText),
             branch = null,
             source = source,
         )
     }
 
     private fun parseSchemaJsonLd(document: Document): JSONObject? {
-        // The page embeds several schema.org blocks (WebPage @graph wrapper,
-        // ComicSeries, BreadcrumbList). The ComicSeries one is NOT always first,
-        // so scan all blocks and descend @graph / mainEntity wrappers to find it.
         for (script in document.select("script[type=\"application/ld+json\"]")) {
             val graphJson = script.data()
             val start = graphJson.indexOf('{')
@@ -356,24 +437,27 @@ public class IkiruParser(
             if (end < 0) continue
             val root = runCatching { JSONObject(graphJson.substring(start, end + 1)) }.getOrNull()
                 ?: continue
-            findComicSeries(root)?.let { return it }
+            findBookOrComicSeries(root)?.let { return it }
         }
         return null
     }
 
-    private fun findComicSeries(node: JSONObject): JSONObject? {
+    private fun findBookOrComicSeries(node: JSONObject): JSONObject? {
         node.optJSONArray("@graph")?.let { graph ->
             for (i in 0 until graph.length()) {
-                graph.optJSONObject(i)?.let { findComicSeries(it) }?.let { return it }
+                graph.optJSONObject(i)?.let { findBookOrComicSeries(it) }?.let { return it }
             }
         }
-        node.optJSONObject("mainEntity")?.let { findComicSeries(it)?.let { return it } }
+        node.optJSONObject("mainEntity")?.let { findBookOrComicSeries(it)?.let { return it } }
         val type = node.opt("@type")
-        val isComicSeries = when (type) {
-            is JSONArray -> (0 until type.length()).any { type.optString(it).contains("ComicSeries") }
-            else -> type?.toString()?.contains("ComicSeries") == true
+        val isBookOrSeries = when (type) {
+            is JSONArray -> (0 until type.length()).any {
+                val s = type.optString(it)
+                s.contains("Book") || s.contains("ComicSeries")
+            }
+            else -> type?.toString()?.let { it.contains("Book") || it.contains("ComicSeries") } == true
         }
-        if (isComicSeries && node.optString("name").isNotBlank()) return node
+        if (isBookOrSeries && node.optString("name").isNotBlank()) return node
         return null
     }
 
@@ -385,23 +469,34 @@ public class IkiruParser(
                     ?.removeSuffix("/")
                     ?.substringAfterLast('/')
                     ?.takeIf(String::isNotEmpty)
-                    ?: name.slugify()
+                    ?: resolveGenreId(name)
                 add(MangaTag(name, key, source))
             }
         }
         if (fromMeta.isNotEmpty()) return fromMeta
-        val fromLd = ld?.optJSONArray("genre") ?: return emptySet()
+
+        val genreVal = ld?.opt("genre")
         return buildSet {
-            for (i in 0 until fromLd.length()) {
-                val name = fromLd.optString(i).trim()
-                if (name.isNotEmpty()) add(MangaTag(name, name.slugify(), source))
+            when (genreVal) {
+                is JSONArray -> {
+                    for (i in 0 until genreVal.length()) {
+                        val name = genreVal.optString(i).trim()
+                        if (name.isNotEmpty()) add(MangaTag(name, resolveGenreId(name), source))
+                    }
+                }
+                is String -> {
+                    genreVal.split(',').forEach { part ->
+                        val name = part.trim()
+                        if (name.isNotEmpty()) add(MangaTag(name, resolveGenreId(name), source))
+                    }
+                }
             }
         }
     }
 
     private fun parseAuthors(ld: JSONObject?): Set<String> = buildSet {
         if (ld == null) return@buildSet
-        for (field in arrayOf("author", "illustrator")) {
+        for (field in arrayOf("author", "illustrator", "creator")) {
             val v = ld.opt(field)
             when (v) {
                 is String -> add(v)
@@ -410,10 +505,14 @@ public class IkiruParser(
         }
     }
 
-    private fun parseRating(element: Element): Float {
+    private fun parseRating(element: Element, ld: JSONObject?): Float {
+        val ldScore = ld?.optJSONObject("aggregateRating")?.optDouble("ratingValue")?.toFloat()
+        if (ldScore != null && ldScore > 0f) {
+            return (ldScore / 10f).coerceIn(0f, 1f)
+        }
         val text = element.select("meta[itemprop=ratingValue]").eachAttr("content")
             .filter(String::isNotBlank)
-            .ifEmpty { element.select("meta[itemprop=ratingValue], .numscore, .num, .text-accent").eachText() }
+            .ifEmpty { element.select(".numscore, .num, .score").eachText() }
             .firstOrNull()
             ?: return RATING_UNKNOWN
         val score = text.toFloatOrNull() ?: return RATING_UNKNOWN
@@ -440,13 +539,39 @@ public class IkiruParser(
             ?: 0f
     }
 
-    private fun parseChapterDate(raw: String?): Long {
+    private fun formatChapterNumber(number: Float): String {
+        return if (number % 1f == 0f) number.toInt().toString() else number.toString()
+    }
+
+    private fun parseIsoDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
         return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
             runCatching {
                 SimpleDateFormat(pattern, Locale.US).parse(date)?.time
             }.getOrNull()
         } ?: 0L
+    }
+
+    private fun parseRelativeOrDate(raw: String?): Long {
+        val text = raw?.trim()?.lowercase(Locale.ROOT) ?: return 0L
+        val now = System.currentTimeMillis()
+        val match = Regex("(\\d+)\\s*(detik|menit|jam|hari|minggu|bulan|tahun)").find(text)
+        if (match != null) {
+            val amount = match.groupValues[1].toLongOrNull() ?: return 0L
+            val unit = match.groupValues[2]
+            val millis = when (unit) {
+                "detik" -> amount * 1000L
+                "menit" -> amount * 60 * 1000L
+                "jam" -> amount * 60 * 60 * 1000L
+                "hari" -> amount * 24 * 60 * 60 * 1000L
+                "minggu" -> amount * 7 * 24 * 60 * 60 * 1000L
+                "bulan" -> amount * 30 * 24 * 60 * 60 * 1000L
+                "tahun" -> amount * 365 * 24 * 60 * 60 * 1000L
+                else -> 0L
+            }
+            return now - millis
+        }
+        return parseIsoDate(raw)
     }
 
     private fun findJsonEnd(text: String, openBrace: Int): Int {
@@ -520,22 +645,6 @@ public class IkiruParser(
         return true
     }
 
-    private fun mangaRelativeUrl(url: String): String? {
-        val path = url.substringBefore('?').substringBefore('#')
-        val segments = path.split('/').filter(String::isNotBlank)
-        val filtered = when {
-            segments.firstOrNull()?.contains(':') == true -> segments.drop(2)
-            segments.firstOrNull()?.contains('.') == true -> segments.drop(1)
-            else -> segments
-        }
-        if (filtered.size < 2 || filtered.first() != "manga") return null
-        return "/manga/${filtered[1]}/"
-    }
-
-    private fun String.slugify(): String = lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "-")
-        .trim('-')
-
     private fun titleFromUrl(url: String): String = url
         .substringBefore('?').trimEnd('/').substringAfterLast('/')
         .replace('-', ' ')
@@ -543,13 +652,7 @@ public class IkiruParser(
         .joinToString(" ") { it.replaceFirstChar { c -> c.titlecase(Locale.ROOT) } }
         .ifBlank { "IKIRU" }
 
-    private fun Element.selectText(selector: String): String? =
-        selectFirst(selector)?.textOrNull()
-
     private fun baseUrl(): String = "https://$domain/"
-
-    private fun adminAjaxUrl(action: String): String =
-        "${baseUrl()}wp-admin/admin-ajax.php?action=$action"
 
     private fun documentHeaders(referer: String): Headers = Headers.Builder()
         .add(CommonHeaders.ACCEPT, HTML_ACCEPT)
@@ -560,13 +663,25 @@ public class IkiruParser(
         .add(CommonHeaders.UPGRADE_INSECURE_REQUESTS, "1")
         .build()
 
-    private fun ajaxHeaders(): Headers = Headers.Builder()
-        .add(CommonHeaders.ACCEPT, "text/html, */*; q=0.01")
-        .add(CommonHeaders.ORIGIN, baseUrl().removeSuffix("/"))
-        .add(CommonHeaders.X_REQUESTED_WITH, "XMLHttpRequest")
-        .add(CommonHeaders.SEC_FETCH_MODE, "cors")
-        .add(CommonHeaders.SEC_FETCH_SITE, "same-origin")
-        .build()
+    private suspend fun getJson(url: String): JSONObject {
+        val request = Request.Builder()
+            .url(url)
+            .addHeader(CommonHeaders.ACCEPT, "application/json")
+            .tag(MangaSource::class.java, source)
+            .get()
+            .build()
+        val response = context.httpClient.newCall(request).await()
+        if (response.code in 400..599) {
+            val exception = org.jsoup.HttpStatusException(
+                response.message,
+                response.code,
+                response.request.url.toString(),
+            )
+            response.close()
+            throw exception
+        }
+        return response.parseJson()
+    }
 
     private suspend fun getHtml(url: String, headers: Headers): Document {
         val request = Request.Builder()
@@ -588,43 +703,24 @@ public class IkiruParser(
         return response.parseHtml()
     }
 
-    private suspend fun postHtml(
-        url: String,
-        body: FormBody,
-        headers: Headers,
-    ): Document {
-        val request = Request.Builder()
-            .url(url)
-            .headers(headers)
-            .tag(MangaSource::class.java, source)
-            .post(body)
-            .build()
-        val response = context.httpClient.newCall(request).await()
-        if (response.code in 400..599) {
-            val exception = org.jsoup.HttpStatusException(
-                response.message,
-                response.code,
-                response.request.url.toString(),
-            )
-            response.close()
-            throw exception
-        }
-        return response.parseHtml()
+    private fun resolveGenreId(key: String): String {
+        if (key.length == 36 && key.contains('-')) return key
+        return FALLBACK_GENRES_MAP[key.lowercase(Locale.ROOT)]
+            ?: FALLBACK_GENRES_MAP[key.slugify()]
+            ?: key
     }
+
+    private fun String.slugify(): String = lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), "-")
+        .trim('-')
 
     private fun fallbackTags(): Set<MangaTag> = buildSet {
-        FALLBACK_GENRES.forEach { slug -> add(MangaTag(slug.titlecase(), slug, source)) }
-        add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
+        FALLBACK_GENRES.forEach { (name, id) -> add(MangaTag(name, id, source)) }
     }
 
-    private fun String.titlecase(): String = replaceFirstChar { it.titlecase(Locale.ROOT) }
-
     private companion object {
-        private const val PROJECT_TAG_KEY = "project"
-        private const val PROJECT_TAG_TITLE = "Project"
         private const val HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
-        private const val CARD_SELECTOR = "div:has(> a[href*=\"/manga/\"])"
-        private const val PAGE_IMAGE_SELECTOR = "section[data-image-data=\"1\"] img"
+        private const val PAGE_IMAGE_SELECTOR = ".rpage img, div[class*=rpage] img, section[data-image-data=\"1\"] img"
 
         private val IMAGE_ATTRIBUTES = arrayOf(
             "data-src", "data-lazy-src", "data-original", "data-srcset", "srcset", "src",
@@ -632,15 +728,59 @@ public class IkiruParser(
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val CHAPTER_NUMBER_REGEX = Regex("(?:chapter|chap|ch\\.?|episode|ep\\.?)\\s*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE)
         private val DATE_FORMATS = arrayOf(
-            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss",
+            "yyyy-MM-dd",
         )
 
         private val FALLBACK_GENRES = listOf(
-            "action", "adventure", "comedy", "drama", "fantasy", "harem", "horror",
-            "isekai", "magic", "manhua", "manhwa", "martial-arts", "mecha", "mystery",
-            "romance", "school-life", "sci-fi", "seinen", "shounen", "slice-of-life",
-            "sports", "supernatural", "tragedy", "yuri",
+            "Fantasy" to "01a102f5-709a-732a-9656-05d3d83f712e",
+            "Action" to "01a10313-2bb6-722c-9497-925e7b423c24",
+            "Shounen" to "01a10313-2bb9-744f-b1ae-18f74252dd88",
+            "Drama" to "01a102ef-6ba9-723d-ba9a-5ebb04dc0929",
+            "Comedy" to "01a102f5-7099-7109-9bc2-9d5cb158ab54",
+            "Romance" to "01a10319-9754-761b-9160-b1ab24806289",
+            "Adventure" to "01a102f5-7098-77bc-9a1f-e1b12154fda0",
+            "Seinen" to "01a102ef-6baa-757f-aeaf-d47ae169d241",
+            "School Life" to "01a10319-9755-754e-92f3-a6c5cd8880eb",
+            "Supernatural" to "01a102ef-6bac-72ca-abe5-f66a111a850a",
+            "Slice of Life" to "01a102ef-6bab-72ea-82b6-aab5fc10bc80",
+            "Ecchi" to "01a106ea-26e6-768e-81cb-d9fc14505433",
+            "Harem" to "01a10319-9753-77af-a80b-b0b4517e71f3",
+            "Martial Arts" to "01a106b8-81f1-76af-800c-3aa006417294",
+            "Sci-fi" to "01a10648-6664-759e-9be9-b9d14931e84e",
+            "Mature" to "01a106e5-6106-765b-98ae-d4eb4b16357c",
+            "Mystery" to "01a10644-5385-7778-b347-a3bb2f354b11",
+            "Shoujo" to "01a1067e-6943-720e-90c7-a3c6e442960b",
+            "Historical" to "01a106e3-f9b0-7508-9191-d47788c973fc",
+            "Psychological" to "01a10694-5e5f-768d-94fe-78d03c45373e",
+            "Horror" to "01a10694-5e5e-7555-bd40-a3e145b5a7f2",
+            "Tragedy" to "01a10697-0e7a-75a3-97fc-a13f8a3fe53d",
+            "Adult" to "01a10720-3e1f-73c8-8c46-c6408f30e826",
+            "Gender Bender" to "01a106f3-9f51-774b-bc61-840e690e766a",
+            "Josei" to "01a10644-5385-7778-b347-9c53be2aae91",
+            "Sports" to "01a10677-e30b-7298-b280-63596f2cb99d",
+            "Yuri" to "01a10725-ff6a-74f8-a955-79e16845bda6",
+            "Shoujo Ai" to "01a10725-ff69-74f8-8811-d4e12b2a6e66",
+            "Mecha" to "01a10934-11af-7519-bcfe-571b79aed954",
+            "Lolicon" to "01a10c75-22cb-723d-817e-fb82b7d8befb",
+            "Shounen Ai" to "01a10f05-0394-769e-a9c0-cf23fd23271e",
+            "Smut" to "01a11053-1271-7658-b8f2-20670bfe872f",
+            "Hentai" to "01a111f0-1504-71e1-92d9-3ff60d417ea3",
+            "Shotacon" to "01a10920-de9b-7553-b728-a31d31475d6a",
+            "Doujinshi" to "01a11053-1270-73b8-9314-5c6489b59d97",
+            "One-Shot" to "01a106f8-8290-70ce-a46a-514575525feb",
+            "Yaoi" to "01a12040-7792-75fc-879c-3b14e50c120d",
         )
+
+        private val FALLBACK_GENRES_MAP = buildMap {
+            FALLBACK_GENRES.forEach { (name, id) ->
+                put(name.lowercase(Locale.ROOT), id)
+                put(name.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "-").trim('-'), id)
+            }
+        }
     }
 }
