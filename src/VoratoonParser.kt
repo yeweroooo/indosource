@@ -39,8 +39,10 @@ import java.util.EnumSet
 import java.util.Locale
 
 /**
- * Voratoon (https://www.voratoon.com — portal https://voratoon.id — mirrors
- * v1/v2/v3.voratoon.com). Successor of the Komikcast backend, same JSON API:
+ * Voratoon (portal https://voratoon.id — web mirrors v1/v2/v3/v8.voratoon.com).
+ * JSON API lives on https://api.voratoon.com — the old www.voratoon.com API host
+ * died on 2026-10-14 (Cloudflare 523, origin unreachable). Successor of the
+ * Komikcast backend, same JSON API:
  *  - List: GET /series?page=N&take=12&includeMeta=true
  *  - Search: /series?title={query}
  *  - Filters: /series?genreIds={GenreName}&format=manga|manhwa|manhua
@@ -62,11 +64,14 @@ public class VoratoonParser(
     source = MangaParserSource.VORATOON,
     pageSize = 24,
 ) {
+    // NOTE (2026-10-14): www.voratoon.com died (Cloudflare 523, origin
+    // unreachable); the JSON API moved to api.voratoon.com. v1/v2/v3/v8 are
+    // Next.js web mirrors — they serve HTML, not the API — so they are NOT
+    // valid API domains and were removed from the presets. www is kept as a
+    // fallback in case it ever comes back.
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
+        "api.voratoon.com",
         "www.voratoon.com",
-        "v1.voratoon.com",
-        "v2.voratoon.com",
-        "v3.voratoon.com",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -91,7 +96,7 @@ public class VoratoonParser(
 
     // Source icon: the app builds it from getFavicons(), whose default
     // implementation scrapes https://$domain/ — but `domain` is the JSON API host
-    // here ({"hello":"world"}, no <link rel=icon>, /favicon.ico answers 404), so no
+    // here (returns JSON, no <link rel=icon>, /favicon.ico answers 404), so no
     // icon was ever found. The web frontend serves the real ones.
     override suspend fun getFavicons(): Favicons = Favicons(
         listOf(
@@ -269,7 +274,9 @@ public class VoratoonParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        // Accept links shared from the web frontend mirrors too — details and
+        // chapters still load through the API host.
+        val allowedHosts = configKeyDomain.presetValues.toSet() + WEB_HOSTS
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.isEmpty() || segments.first() != "series") return null
@@ -466,7 +473,18 @@ public class VoratoonParser(
         private const val ANIME_TAG_TITLE = "Anime Adaptation"
 
         // Web frontend (not the API host) — it serves /icon.png + /apple-icon.png.
-        private const val SITE_DOMAIN = "v1.voratoon.com"
+        // v1/v2/v3 redirect to v8, the current live mirror (checked 2026-10-14).
+        private const val SITE_DOMAIN = "v8.voratoon.com"
+
+        // Web frontend mirrors — valid for shared links, never for the API.
+        private val WEB_HOSTS = setOf(
+            "voratoon.id",
+            "www.voratoon.com",
+            "v1.voratoon.com",
+            "v2.voratoon.com",
+            "v3.voratoon.com",
+            "v8.voratoon.com",
+        )
 
         private val DATE_FORMATS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",

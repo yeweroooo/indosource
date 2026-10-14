@@ -10,7 +10,7 @@ Satu file `indosource.jar` berisi **11 sumber**:
 | Shinigami | 11.shinigami.asia | JSON API |
 | Kiryuu | v7.kiryuu.to | HTML + admin-ajax |
 | APKOMIK | 01.apkomik.com | HTML (themesia mangastream) |
-| Voratoon | www.voratoon.com | JSON API (menggantikan Komikcast) |
+| Voratoon | api.voratoon.com | JSON API (menggantikan Komikcast) |
 | IKIRU | 07.ikiru.wtf | HTML + JSON-LD |
 | Cosmic Toons | 02.cosmicscans.to | JSON API |
 | Komiknesia | v1.komiknesiaku.com | JSON API |
@@ -36,7 +36,7 @@ Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
 - Reader: halaman dari `lms.imgsvr.my.id`
 - Catatan: situs menanam **honeypot trap** (`/comic/honeypot-trap-*` yang mengarah ke `/api/honeypot/trap`, memban IP pengunjung) — parser memfilter slug ini sehingga tidak pernah dikunjungi
 
-**Voratoon** (`voratoon.id` / `www.voratoon.com`, mirror `v1`/`v2`/`v3.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama. Didukung:
+**Voratoon** (portal `voratoon.id`, mirror web `v1`/`v2`/`v3`/`v8.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama — API dilayani dari `api.voratoon.com` (sejak 2026-10-14; `www.voratoon.com` mati). Didukung:
 - Browse + **search** (`?title=`) dan **filter lengkap**: 48 genre (multi-genre), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua), tipe **Project/Mirror**, tag **Hot/Recommended/Anime Adaptation**
 - Sort: terbaru, update, popularitas, rating, views
 - Detail: sinopsis, status, rating, genre, daftar chapter lengkap (urutan normal)
