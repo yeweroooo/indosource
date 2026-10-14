@@ -65,11 +65,10 @@ public class IkiruParser(
         "09.ikiru.wtf",
         "ikiru.id",
         "08.ikiru.wtf",
-        "07.ikiru.wtf",
-        "05.ikiru.wtf",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+        SortOrder.RELEVANCE,
         SortOrder.UPDATED,
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
@@ -356,7 +355,7 @@ public class IkiruParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("07.ikiru.wtf", "05.ikiru.wtf")
         if (link.host !in allowedHosts) return null
         if (!link.pathSegments.firstOrNull().equals("manga")) return null
         if (link.pathSegments.size < 2) return null
@@ -386,6 +385,7 @@ public class IkiruParser(
         -> "popular" to "desc"
         SortOrder.RATING -> "rating" to "desc"
         SortOrder.NEWEST -> "created" to "desc"
+        SortOrder.RELEVANCE -> "popular" to "desc"
         else -> "updated" to "desc"
     }
 

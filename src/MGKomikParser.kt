@@ -61,7 +61,6 @@ public class MGKomikParser(
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "web1.mgkomik.cc",
         "id.mgkomik.cc",
-        "mgkomik.id",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -195,7 +194,7 @@ public class MGKomikParser(
     )
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("mgkomik.id")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != MANGA_PATH) return null

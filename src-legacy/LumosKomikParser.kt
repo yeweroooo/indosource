@@ -61,10 +61,10 @@ public class LumosKomikParser(
         "03.lumosgg.com",
         "lumosgg.com",
         "02.lumosgg.com",
-        "01.lumosgg.com",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+        SortOrder.RELEVANCE,
         SortOrder.UPDATED,
         SortOrder.POPULARITY,
         SortOrder.RATING,
@@ -202,7 +202,7 @@ public class LumosKomikParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("01.lumosgg.com")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size < 2 || segments[0] != "comic") return null
@@ -395,6 +395,7 @@ public class LumosKomikParser(
         SortOrder.POPULARITY -> "popular"
         SortOrder.RATING -> "rating"
         SortOrder.ALPHABETICAL -> "az"
+        SortOrder.RELEVANCE -> "popular"
         else -> "latest"
     }
 

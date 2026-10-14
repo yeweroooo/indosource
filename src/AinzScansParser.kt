@@ -74,6 +74,7 @@ public class AinzScansParser(
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+        SortOrder.RELEVANCE,
         SortOrder.UPDATED,
         SortOrder.NEWEST,
         SortOrder.POPULARITY,

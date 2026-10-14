@@ -68,7 +68,6 @@ public class KomiknesiaParser(
         "v1.komiknesiaku.com",
         "komiknesia.id",
         "02.komiknesia.asia",
-        "03.komiknesia.asia",
         "id.komiknesia.net",
     )
 
@@ -262,7 +261,7 @@ public class KomiknesiaParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("03.komiknesia.asia")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != MANGA_PATH) return null

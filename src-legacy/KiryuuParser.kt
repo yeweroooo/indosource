@@ -60,7 +60,6 @@ public class KiryuuParser(
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "v7.kiryuu.to",
         "kiryuu.io",
-        "kiryuu.to",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
@@ -186,7 +185,7 @@ public class KiryuuParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("kiryuu.to")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != MANGA_PATH) return null

@@ -58,10 +58,10 @@ public class CosmicToonsParser(
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "cdncid.csmcscns.id",
-        "02.cosmicscans.to",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
+        SortOrder.RELEVANCE,
         SortOrder.UPDATED,
         SortOrder.NEWEST,
         SortOrder.ALPHABETICAL,
@@ -209,7 +209,7 @@ public class CosmicToonsParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("02.cosmicscans.to", "cosmicscans.to")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size < 2 || segments.first() != "comics") return null

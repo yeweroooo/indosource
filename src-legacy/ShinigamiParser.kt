@@ -57,7 +57,6 @@ public class ShinigamiParser(
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "11.shinigami.asia",
-        "shinigami.to",
         "shinigami.asia",
     )
 
@@ -178,7 +177,7 @@ public class ShinigamiParser(
     }
 
     override suspend fun resolveLink(link: okhttp3.HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet()
+        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("shinigami.to")
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != "series") return null

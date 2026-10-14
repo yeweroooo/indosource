@@ -71,7 +71,6 @@ public class VoratoonParser(
     // fallback in case it ever comes back.
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "api.voratoon.com",
-        "www.voratoon.com",
     )
 
     override val availableSortOrders: Set<SortOrder> = EnumSet.of(
