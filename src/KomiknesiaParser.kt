@@ -29,9 +29,7 @@ import tsuki.network.CommonHeaders
 import tsuki.util.await
 import tsuki.util.generateUid
 import tsuki.util.json.getStringOrNull
-import tsuki.util.json.mapJSONNotNull
 import tsuki.util.parseJson
-import tsuki.util.parseJsonArray
 import tsuki.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -51,7 +49,8 @@ import javax.crypto.spec.SecretKeySpec
  *                   &project=true|false&source=kiryu|apkomik&popularWindow=day|week|month
  *  - Genres:        GET /contents/genres            ({id, name, slug}, filter by NUMERIC id)
  *  - Detail:        GET /manga/slug/{slug}          (full manga, ALL chapters inline)
- *  - Reader:        GET /chapters/{id}/images       (array of {id, image_path, page_number})
+ *  - Reader:        GET /chapters/slug/{slug}      (public; {"data":{"images":[url...]}})
+ *                   (the old /chapters/{id}/images now needs a login token: HTTP 401)
  *
  * The API requires an `Origin: https://v1.komiknesiaku.com` header (whitelist of the
  * frontend mirror domains; komiknesia.id itself is NOT accepted, and no Origin at all
@@ -216,17 +215,31 @@ public class KomiknesiaParser(
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
-        val chapterId = chapter.url.removeSuffix("/").substringAfterLast('/')
-            .toLongOrNull() ?: return emptyList()
-        val array = getJsonArray("${API_BASE_URL}chapters/$chapterId/images")
-        return array.mapJSONNotNull { item ->
-            val url = item.optString("image_path").takeIf(String::isNotBlank) ?: return@mapJSONNotNull null
-            MangaPage(
-                id = generateUid(source, "${chapter.url}#${item.optInt("page_number", 0)}:$url"),
-                url = url,
-                preview = url,
-                source = source,
-            )
+        // Public reader endpoint — the same one the website itself uses:
+        // GET /chapters/slug/{slug} -> {"status", "data": {"images": [url...], ...}}.
+        // (The old /chapters/{id}/images now requires a login token: HTTP 401.)
+        // The endpoint is mid-migration on their side (may 301 to the web frontend);
+        // a non-JSON answer degrades to an empty page list instead of crashing.
+        val slug = chapter.url.removeSuffix("/").substringAfterLast('/')
+        if (slug.isBlank()) return emptyList()
+        val json = try {
+            getJson("${API_BASE_URL}chapters/slug/$slug")
+        } catch (e: org.json.JSONException) {
+            return emptyList()
+        }
+        val images = json.optJSONObject("data")?.optJSONArray("images") ?: return emptyList()
+        return buildList {
+            for (i in 0 until images.length()) {
+                val imageUrl = images.optString(i).takeIf(String::isNotBlank) ?: continue
+                add(
+                    MangaPage(
+                        id = generateUid(source, "${chapter.url}#$i:$imageUrl"),
+                        url = imageUrl,
+                        preview = imageUrl,
+                        source = source,
+                    ),
+                )
+            }
         }
     }
 
@@ -328,13 +341,15 @@ public class KomiknesiaParser(
                 ?: item.getStringOrNull("chapter_number")?.let { "Chapter $it" }
             val number = item.optString("chapter_number").toFloatOrNull() ?: 0f
             val uploadDate = parseChapterDate(item.getStringOrNull("created_at"))
+            // Reader route on the website is /view/:chapterSlug; getPages uses it.
+            val slug = item.getStringOrNull("slug")?.trim()?.takeIf(String::isNotBlank)
             add(
                 MangaChapter(
                     id = generateUid(source, id),
                     title = title,
                     number = number,
                     volume = 0,
-                    url = "/view/$id",
+                    url = "/view/${slug ?: id}",
                     scanlator = null,
                     uploadDate = uploadDate,
                     branch = null,
@@ -446,26 +461,6 @@ public class KomiknesiaParser(
         return unwrapEnvelope(response.parseJson())
     }
 
-    private suspend fun getJsonArray(url: String): JSONArray {
-        val request = Request.Builder()
-            .url(url)
-            .addHeader(CommonHeaders.ACCEPT, "application/json")
-            .addHeader(CommonHeaders.ORIGIN, ORIGIN_HEADER)
-            .tag(MangaSource::class.java, source)
-            .get()
-            .build()
-        val response = context.httpClient.newCall(request).await()
-        if (response.code in 400..599) {
-            val exception = org.jsoup.HttpStatusException(
-                response.message,
-                response.code,
-                response.request.url.toString(),
-            )
-            response.close()
-            throw exception
-        }
-        return unwrapEnvelopeArray(response.parseJson())
-    }
 
     // --- Encrypted API envelope (since ~2026-10-15) ---
     // Every endpoint now answers {"status":true,"encrypted":true,"data":"<b64>","time":<unix>}
@@ -476,15 +471,6 @@ public class KomiknesiaParser(
         val data = envelope.optString("data").takeIf(String::isNotBlank)
             ?: throw IllegalStateException("Komiknesia: encrypted envelope without data")
         return JSONObject(decryptEnvelopeData(data, envelope.optLong("time")))
-    }
-
-    private fun unwrapEnvelopeArray(envelope: JSONObject): JSONArray {
-        if (!envelope.optBoolean("encrypted", false)) {
-            throw IllegalStateException("Komiknesia: expected encrypted envelope, got plain JSON")
-        }
-        val data = envelope.optString("data").takeIf(String::isNotBlank)
-            ?: throw IllegalStateException("Komiknesia: encrypted envelope without data")
-        return JSONArray(decryptEnvelopeData(data, envelope.optLong("time")))
     }
 
     private fun decryptEnvelopeData(dataB64: String, timeSeconds: Long): String {
