@@ -529,7 +529,7 @@ public class KomiknesiaParser(
     // equivalent to the JS, with no floating-point drift.
     private fun deriveKey(timeSeconds: Long): String {
         val intPart = timeSeconds / 32
-        val fracPart = (timeSeconds % 32) * 10_000_000L / 32
+        val fracPart = (timeSeconds % 32) * 100_000_000L / 32
         var n = "$intPart.${fracPart.toString().padStart(8, '0')}"
         n = when {
             n.length < 32 -> n.padEnd(32, '0')
