@@ -37,6 +37,9 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.EnumSet
 import java.util.Locale
+import javax.crypto.Cipher
+import javax.crypto.spec.IvParameterSpec
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Komiknesia (https://komiknesia.id / https://v1.komiknesiaku.com) — JSON API source.
@@ -56,6 +59,13 @@ import java.util.Locale
  * frontend sends is optional. List pagination: per_page clamps to [10, 60], page clamps
  * to 200 (requesting page > 200 silently returns page 200 again — detect via meta.page
  * < requested page and stop). Reader images on data.cdnesia.my.id are hotlink-open.
+ *
+ * Since ~2026-10-15 every endpoint encrypts its response envelope:
+ * {"status":true,"encrypted":true,"data":"<base64>","time":<unix seconds>}.
+ * data = base64( iv[16] ++ AES-256-CBC(plaintext JSON) ), key = deriveKey(time):
+ * (time/32).toFixed(8) padded/truncated to 32 chars, UTF-8 — mirrors the web
+ * frontend's Decryptor (CryptoJS). The decrypted payload is the plain JSON this
+ * parser was written against (verified live 2026-10-15).
  */
 public class KomiknesiaParser(
     context: MangaLoaderContext,
@@ -68,6 +78,7 @@ public class KomiknesiaParser(
         "v1.komiknesiaku.com",
         "komiknesia.id",
         "02.komiknesia.asia",
+        "03.komiknesia.asia",
         "id.komiknesia.net",
     )
 
@@ -261,7 +272,7 @@ public class KomiknesiaParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("03.komiknesia.asia")
+        val allowedHosts = configKeyDomain.presetValues.toSet()
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != MANGA_PATH) return null
@@ -432,7 +443,7 @@ public class KomiknesiaParser(
             response.close()
             throw exception
         }
-        return response.parseJson()
+        return unwrapEnvelope(response.parseJson())
     }
 
     private suspend fun getJsonArray(url: String): JSONArray {
@@ -453,7 +464,79 @@ public class KomiknesiaParser(
             response.close()
             throw exception
         }
-        return response.parseJsonArray()
+        return unwrapEnvelopeArray(response.parseJson())
+    }
+
+    // --- Encrypted API envelope (since ~2026-10-15) ---
+    // Every endpoint now answers {"status":true,"encrypted":true,"data":"<b64>","time":<unix>}
+    // instead of plain JSON. data = base64(iv[16] ++ AES-256-CBC(plaintext JSON)),
+    // key = deriveKey(time) as UTF-8 — mirrors the web frontend's Decryptor (CryptoJS).
+    private fun unwrapEnvelope(envelope: JSONObject): JSONObject {
+        if (!envelope.optBoolean("encrypted", false)) return envelope
+        val data = envelope.optString("data").takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Komiknesia: encrypted envelope without data")
+        return JSONObject(decryptEnvelopeData(data, envelope.optLong("time")))
+    }
+
+    private fun unwrapEnvelopeArray(envelope: JSONObject): JSONArray {
+        if (!envelope.optBoolean("encrypted", false)) {
+            throw IllegalStateException("Komiknesia: expected encrypted envelope, got plain JSON")
+        }
+        val data = envelope.optString("data").takeIf(String::isNotBlank)
+            ?: throw IllegalStateException("Komiknesia: encrypted envelope without data")
+        return JSONArray(decryptEnvelopeData(data, envelope.optLong("time")))
+    }
+
+    private fun decryptEnvelopeData(dataB64: String, timeSeconds: Long): String {
+        val raw = decodeBase64(dataB64)
+        require(raw.size > 16) { "Komiknesia: encrypted payload too short" }
+        val key = SecretKeySpec(deriveKey(timeSeconds).toByteArray(Charsets.UTF_8), "AES")
+        val cipher = Cipher.getInstance("AES/CBC/PKCS5Padding")
+        cipher.init(Cipher.DECRYPT_MODE, key, IvParameterSpec(raw, 0, 16))
+        return cipher.doFinal(raw, 16, raw.size - 16).toString(Charsets.UTF_8)
+    }
+
+
+    // Dependency-free base64 decoder (standard alphabet). The compile classpath
+    // has no Android framework (no android.util.Base64) and java.util.Base64
+    // needs API 26+ while the plugin targets API 24 — so we decode by hand.
+    private fun decodeBase64(input: String): ByteArray {
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        val clean = input.filterNot { it.isWhitespace() }
+        require(clean.isNotEmpty() && clean.length % 4 == 0) { "Komiknesia: invalid base64" }
+        val pad = clean.takeLast(2).count { it == '=' }
+        val out = ByteArray(clean.length / 4 * 3 - pad)
+        var o = 0
+        val quads = clean.length / 4
+        for (q in 0 until quads) {
+            val b0 = alphabet.indexOf(clean[q * 4])
+            val b1 = alphabet.indexOf(clean[q * 4 + 1])
+            val b2 = alphabet.indexOf(clean[q * 4 + 2]).takeIf { clean[q * 4 + 2] != '=' } ?: 0
+            val b3 = alphabet.indexOf(clean[q * 4 + 3]).takeIf { clean[q * 4 + 3] != '=' } ?: 0
+            require(b0 >= 0 && b1 >= 0 && b2 >= 0 && b3 >= 0) { "Komiknesia: invalid base64 char" }
+            val n = (b0 shl 18) or (b1 shl 12) or (b2 shl 6) or b3
+            val bytes = if (q == quads - 1) 3 - pad else 3
+            out[o++] = (n shr 16).toByte()
+            if (bytes > 1) out[o++] = (n shr 8).toByte()
+            if (bytes > 2) out[o++] = n.toByte()
+        }
+        return out
+    }
+
+    // Mirrors the frontend: key = (Number(time)/32).toFixed(8), padded/truncated
+    // to 32 chars. time/32 is exact in binary (the divisor is 2^5), so its decimal
+    // expansion always terminates — the integer arithmetic below is exactly
+    // equivalent to the JS, with no floating-point drift.
+    private fun deriveKey(timeSeconds: Long): String {
+        val intPart = timeSeconds / 32
+        val fracPart = (timeSeconds % 32) * 10_000_000L / 32
+        var n = "$intPart.${fracPart.toString().padStart(8, '0')}"
+        n = when {
+            n.length < 32 -> n.padEnd(32, '0')
+            n.length > 32 -> n.substring(0, 32)
+            else -> n
+        }
+        return n
     }
 
     private fun fallbackTags(): Set<MangaTag> = buildSet {
