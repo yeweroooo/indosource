@@ -23,4 +23,5 @@ public enum class MangaParserSource(
     AINZSCANS("Ainz Scans", "id", ContentType.MANGA, false),
     LUMOSKOMIK("LumosKomik", "id", ContentType.MANGA, false),
     MANGADEX("MangaDex", "all", ContentType.MANGA, false),
+    ASURASCANS("Asura Scans", "en", ContentType.MANGA, false),
 }

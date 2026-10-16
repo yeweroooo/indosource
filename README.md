@@ -2,7 +2,7 @@
 
 Plugin sumber manga Indonesia untuk aplikasi baca manga **Usagi** (dan aplikasi berbasis Kotatsu).
 
-Satu file `indosource.jar` berisi **12 sumber**:
+Satu file `indosource.jar` berisi **13 sumber**:
 
 | Sumber | Domain utama | Teknik |
 |---|---|---|
@@ -18,6 +18,7 @@ Satu file `indosource.jar` berisi **12 sumber**:
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 | LumosKomik | 03.lumosgg.com | HTML (Astro SSR) |
 | MangaDex | api.mangadex.org | JSON API (Any Language / Multi-language) |
+| Asura Scans | asurascans.com | JSON API + Astro SSR (English) |
 
 Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 - **tsuki-style** (`tsuki.MangaParserFactoryKt` + `tsuki.model.MangaParserSource`) — app versi tsuki (0.0.32-beta+ / 1.0.0-rc1+)
@@ -26,9 +27,16 @@ Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 Struktur source:
 - `src/` — parser tsuki-style (package `org.koitharu.kotatsu.parsers.site.id`)
 - `src-legacy/` — parser org.koitharu-style (package `...site.id.legacy`)
-- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (12 sumber)
+- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (13 sumber)
 
 Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+
+**Asura Scans** (`asurascans.com`, API `api.asurascans.com`) — scanlation manhwa/manhua berbahasa Inggris (flag ENG):
+- Browse & **search** (`?search=`) + sorting (update, popularitas, rating, terbaru, alfabet) & `SortOrder.RELEVANCE`
+- Filter 35 genre lengkap (Action, Murim, Regression, Reincarnation, System, Necromancer, dll.), status (ongoing, completed, hiatus, dropped), tipe (manhwa, manhua, manga), dan author
+- Detail: judul alternatif, sinopsis, cover art HD, rating, dan daftar bab lengkap
+- Reader: ekstraksi gambar beresolusi tinggi langsung dari CDN Asura
+- Link resolver: mendukung link `asurascans.com/comics/...`, `/manga/...`, dan `/series/...`
 
 **MangaDex** (`api.mangadex.org`, portal `mangadex.org`) — integrasi penuh REST API v5:
 - Flag **Any Language** (locale `all` / multi-bahasa): browse, cari, dan baca manga dalam bahasa apa saja (Indonesia, Inggris, Jepang, dsb.) atau filter ke bahasa tertentu

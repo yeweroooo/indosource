@@ -4,6 +4,7 @@ import org.koitharu.kotatsu.parsers.core.MangaParserWrapper
 import org.koitharu.kotatsu.parsers.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.id.legacy.AinzScansParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.ApKomikParser
+import org.koitharu.kotatsu.parsers.site.id.legacy.AsuraScansParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.CosmicToonsParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.IkiruParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.KiryuuParser
@@ -29,6 +30,7 @@ public fun newParser(source: MangaParserSource, context: MangaLoaderContext): Ma
         MangaParserSource.AINZSCANS -> AinzScansParser(context)
         MangaParserSource.LUMOSKOMIK -> LumosKomikParser(context)
         MangaParserSource.MANGADEX -> MangaDexParser(context)
+        MangaParserSource.ASURASCANS -> AsuraScansParser(context)
     }
     check(parser.source == source) {
         "Cannot instantiate manga parser: ${source.name} mapped to ${parser.source}"

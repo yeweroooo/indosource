@@ -4,6 +4,7 @@ import tsuki.core.MangaParserWrapper
 import tsuki.model.MangaParserSource
 import org.koitharu.kotatsu.parsers.site.id.AinzScansParser
 import org.koitharu.kotatsu.parsers.site.id.ApKomikParser
+import org.koitharu.kotatsu.parsers.site.id.AsuraScansParser
 import org.koitharu.kotatsu.parsers.site.id.CosmicToonsParser
 import org.koitharu.kotatsu.parsers.site.id.IkiruParser
 import org.koitharu.kotatsu.parsers.site.id.KiryuuParser
@@ -29,6 +30,7 @@ public fun newParser(source: MangaParserSource, context: MangaLoaderContext): Ma
         MangaParserSource.AINZSCANS -> AinzScansParser(context)
         MangaParserSource.LUMOSKOMIK -> LumosKomikParser(context)
         MangaParserSource.MANGADEX -> MangaDexParser(context)
+        MangaParserSource.ASURASCANS -> AsuraScansParser(context)
     }
     check(parser.source == source) {
         "Cannot instantiate manga parser: ${source.name} mapped to ${parser.source}"
