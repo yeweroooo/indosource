@@ -2,7 +2,7 @@
 
 Plugin sumber manga Indonesia untuk aplikasi baca manga **Usagi** (dan aplikasi berbasis Kotatsu).
 
-Satu file `indosource.jar` berisi **11 sumber**:
+Satu file `indosource.jar` berisi **12 sumber**:
 
 | Sumber | Domain utama | Teknik |
 |---|---|---|
@@ -17,6 +17,7 @@ Satu file `indosource.jar` berisi **11 sumber**:
 | Westmanga | v1.westmanga.my | JSON API (signed) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 | LumosKomik | 03.lumosgg.com | HTML (Astro SSR) |
+| MangaDex | api.mangadex.org | JSON API (Any Language / Multi-language) |
 
 Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 - **tsuki-style** (`tsuki.MangaParserFactoryKt` + `tsuki.model.MangaParserSource`) — app versi tsuki (0.0.32-beta+ / 1.0.0-rc1+)
@@ -25,9 +26,17 @@ Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 Struktur source:
 - `src/` — parser tsuki-style (package `org.koitharu.kotatsu.parsers.site.id`)
 - `src-legacy/` — parser org.koitharu-style (package `...site.id.legacy`)
-- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (11 sumber, VORATOON menggantikan KOMIKCAST)
+- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (12 sumber)
 
 Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
+
+**MangaDex** (`api.mangadex.org`, portal `mangadex.org`) — integrasi penuh REST API v5:
+- Flag **Any Language** (locale `all` / multi-bahasa): browse, cari, dan baca manga dalam bahasa apa saja (Indonesia, Inggris, Jepang, dsb.) atau filter ke bahasa tertentu
+- Browse & **search** (`?title=`) + relevance sorting, terpopuler, terbaru, rating, dan alfabet
+- Filter lengkap: 77 tag MangaDex (genre, format, tema, konten), status rilis, format (Manga/Manhwa/Manhua), target pembaca (Shounen/Shoujo/Seinen/Josei), content rating, dan tahun
+- Detail: judul alternatif, sinopsis, cover art HD, rating bayesian, dan daftar chapter lengkap dengan pembagian branch bahasa (ID, EN, JA, dll.)
+- Reader: integrasi MangaDex@Home API (gambar resolusi penuh + preview data-saver)
+- Link resolver: mendukung link `mangadex.org/title/...`, `mangadex.org/manga/...`, dan `mangadex.org/chapter/...`
 
 **LumosKomik** (`03.lumosgg.com`, portal `lumosgg.com`) — situs Astro SSR, semua fitur jalan lewat HTTP murni:
 - Browse + **search** (`?q=`) + **filter**: 185+ genre (**multi-genre**, dipisah koma → interseksi server-side), status (ongoing/completed/hiatus), tipe (manga/manhwa/manhua)
