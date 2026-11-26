@@ -2,7 +2,9 @@ package org.koitharu.kotatsu.parsers.site.id.legacy
 
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import org.koitharu.kotatsu.parsers.MangaLoaderContext
@@ -34,6 +36,8 @@ import java.util.Date
 import java.util.EnumSet
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import javax.crypto.Mac
+import javax.crypto.spec.SecretKeySpec
 
 /**
  * Cosmic Toons (https://02.cosmicscans.to, API at https://cdncid.csmcscns.id).
@@ -48,6 +52,15 @@ import java.util.concurrent.ConcurrentHashMap
  *  - Details: /v1/manga/mangaDetail/{slug} | Reader: /v1/manga/readingPage/{slug}
  *  - Pagination is cursor-based (`after` = nextCursor); pages are cached per list key.
  *  - 18 genres + status/type enums hardcoded (no public genre-list endpoint).
+ *
+ * Reader images are behind a token wall: readingPage returns trap URLs
+ * (/v1/manga/img/trap/N) in `chapters`. Real page URLs are minted per page:
+ *   POST /v1/manga/img/session {turnstile_token, chapter_slug}
+ *     -> {sessionId, axisKeys:[hex k0, hex k1]}   (protectionEnabled=false,
+ *        so the server accepts the literal token "dev-bypass")
+ *   per page i: msg = "{chapterSlug}:{i}:{Date.now()}", a = msg XOR k1,
+ *     sig = HMAC-SHA256(k0, a), token = "{sessionId}.{b64url(sig)}.{b64url(a)}"
+ *   page URL = /v1/manga/img/r/{token}   (hotlink-open, no Referer needed)
  */
 public class CosmicToonsParser(
     context: MangaLoaderContext,
@@ -161,9 +174,19 @@ public class CosmicToonsParser(
     }
 
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
+        val chapterSlug = chapter.url.trimEnd('/').substringAfterLast('/')
         val url = chapter.url.toAbsoluteUrl(configKeyDomain.presetValues.first())
         val json = getJson(url)
         val data = json.optJSONObject("data") ?: return emptyList()
+
+        // Token-wall path: mint a signed /v1/manga/img/r/{token} URL per page.
+        val pageCount = data.optInt("pageCount", 0)
+        if (pageCount > 0) {
+            val minted = runCatching { mintPageUrls(chapterSlug, pageCount) }.getOrNull()
+            if (!minted.isNullOrEmpty()) return minted
+        }
+
+        // Legacy path: chapters array carries raw <img src> HTML fragments.
         val chapters = data.optJSONArray("chapters") ?: return emptyList()
         return buildList {
             for (i in 0 until chapters.length()) {
@@ -179,6 +202,44 @@ public class CosmicToonsParser(
                         ),
                     )
                 }
+            }
+        }
+    }
+
+    // Mirrors the frontend's mintImageToken (sealedStore slots cancel out, so the
+    // effective keys are just the hex-decoded axisKeys):
+    //   a   = utf8("{chapterSlug}:{i}:{now}") XOR k1
+    //   sig = HMAC-SHA256(k0, a)
+    //   url = /v1/manga/img/r/{sessionId}.{b64url(sig)}.{b64url(a)}
+    private suspend fun mintPageUrls(chapterSlug: String, pageCount: Int): List<MangaPage> {
+        val session = postJson(
+            "${apiBaseUrl()}/v1/manga/img/session",
+            JSONObject()
+                .put("turnstile_token", "dev-bypass")
+                .put("chapter_slug", chapterSlug),
+        ).optJSONObject("data") ?: return emptyList()
+        val sessionId = session.optString("sessionId")
+        val axisKeys = session.optJSONArray("axisKeys") ?: return emptyList()
+        if (sessionId.isBlank() || axisKeys.length() < 2) return emptyList()
+        val k0 = hexDecode(axisKeys.optString(0))
+        val k1 = hexDecode(axisKeys.optString(1))
+        if (k0.isEmpty() || k1.isEmpty()) return emptyList()
+        return buildList {
+            for (i in 0 until pageCount) {
+                val msg = "$chapterSlug:$i:${System.currentTimeMillis()}".toByteArray(Charsets.UTF_8)
+                val a = xorBytes(msg, k1)
+                val mac = Mac.getInstance("HmacSHA256")
+                mac.init(SecretKeySpec(k0, "HmacSHA256"))
+                val sig = mac.doFinal(a)
+                val token = "$sessionId.${base64Url(sig)}.${base64Url(a)}"
+                add(
+                    MangaPage(
+                        id = generateUid(source, "${chapterSlug}#$i"),
+                        url = "${apiBaseUrl()}/v1/manga/img/r/$token",
+                        preview = null,
+                        source = source,
+                    ),
+                )
             }
         }
     }
@@ -209,7 +270,7 @@ public class CosmicToonsParser(
     }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("02.cosmicscans.to", "cosmicscans.to")
+        val allowedHosts = configKeyDomain.presetValues.toSet() + WEB_HOSTS
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size < 2 || segments.first() != "comics") return null
@@ -219,7 +280,7 @@ public class CosmicToonsParser(
             title = "Cosmic Toons manga",
             altTitles = emptySet(),
             url = "/manga/$slug",
-            publicUrl = "https://02.cosmicscans.to/comics/$slug",
+            publicUrl = "$SITE_URL/comics/$slug",
             rating = RATING_UNKNOWN,
             contentRating = sourceContentRating,
             coverUrl = null,
@@ -395,6 +456,8 @@ public class CosmicToonsParser(
         if (lower.contains("logo") || lower.contains("banner") || lower.contains("avatar") || lower.contains("readerarea")) {
             return false
         }
+        // Anti-bot trap URLs served in place of real pages.
+        if (lower.contains("/img/trap/")) return false
         return true
     }
 
@@ -412,6 +475,20 @@ public class CosmicToonsParser(
             .tag(MangaSource::class.java, source)
             .get()
             .build()
+        return executeJson(request)
+    }
+
+    private suspend fun postJson(url: String, body: JSONObject): JSONObject {
+        val request = Request.Builder()
+            .url(url)
+            .addHeader(CommonHeaders.ACCEPT, "application/json")
+            .tag(MangaSource::class.java, source)
+            .post(body.toString().toRequestBody("application/json".toMediaType()))
+            .build()
+        return executeJson(request)
+    }
+
+    private suspend fun executeJson(request: Request): JSONObject {
         val response = context.httpClient.newCall(request).await()
         if (response.code in 400..599) {
             val exception = org.jsoup.HttpStatusException(
@@ -425,6 +502,41 @@ public class CosmicToonsParser(
         return response.parseJson()
     }
 
+    private fun hexDecode(hex: String): ByteArray {
+        val clean = hex.filterNot(Char::isWhitespace)
+        if (clean.length % 2 != 0) return ByteArray(0)
+        return ByteArray(clean.length / 2) { i ->
+            clean.substring(i * 2, i * 2 + 2).toInt(16).toByte()
+        }
+    }
+
+    private fun xorBytes(data: ByteArray, key: ByteArray): ByteArray {
+        if (key.isEmpty()) return data
+        return ByteArray(data.size) { i -> (data[i].toInt() xor key[i % key.size].toInt()).toByte() }
+    }
+
+    // base64url without padding (java.util.Base64 needs API 26+, plugin targets 24).
+    private fun base64Url(data: ByteArray): String {
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+        val sb = StringBuilder((data.size + 2) / 3 * 4)
+        var i = 0
+        while (i + 3 <= data.size) {
+            val n = (data[i].toInt() and 0xFF shl 16) or (data[i + 1].toInt() and 0xFF shl 8) or (data[i + 2].toInt() and 0xFF)
+            sb.append(alphabet[n shr 18 and 63]).append(alphabet[n shr 12 and 63])
+                .append(alphabet[n shr 6 and 63]).append(alphabet[n and 63])
+            i += 3
+        }
+        val rem = data.size - i
+        if (rem == 1) {
+            val n = (data[i].toInt() and 0xFF shl 16)
+            sb.append(alphabet[n shr 18 and 63]).append(alphabet[n shr 12 and 63])
+        } else if (rem == 2) {
+            val n = (data[i].toInt() and 0xFF shl 16) or (data[i + 1].toInt() and 0xFF shl 8)
+            sb.append(alphabet[n shr 18 and 63]).append(alphabet[n shr 12 and 63]).append(alphabet[n shr 6 and 63])
+        }
+        return sb.toString()
+    }
+
     private fun apiBaseUrl(): String = "https://$domain"
 
     private data class ListResult(val items: List<Manga>, val cursor: String, val hasNext: Boolean)
@@ -435,7 +547,15 @@ public class CosmicToonsParser(
 
         // Byte-identical to the base64 favicon the site inlines in its HTML.
         private const val FAVICON_URL = "https://cdncid.csmcscns.id/uploads/2024/01/logo_cosmic.png"
-        private const val SITE_URL = "https://02.cosmicscans.to/"
+        private const val SITE_URL = "https://04.cosmicscans.to/"
+
+        // Live web mirrors (02.cosmicscans.to is dead) — valid for shared links.
+        private val WEB_HOSTS = setOf(
+            "02.cosmicscans.to",
+            "04.cosmicscans.to",
+            "05.cosmicscans.to",
+            "cosmicscans.to",
+        )
         private val IMAGE_SRC_REGEX = Regex("<img[^>]+src=['\"]([^'\"]+)['\"]")
 
         private val DATE_FORMATS = arrayOf(

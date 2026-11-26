@@ -142,6 +142,7 @@ public class LumosKomikParser(
 
         val chapters = document.select(CHAPTER_LINK_SELECTOR)
             .mapNotNull(::chapterFromElement)
+            .distinctBy { it.url }
 
         return manga.copy(
             title = title,
@@ -483,9 +484,12 @@ public class LumosKomikParser(
 
         /** each browse card anchor */
         private const val CARD_SELECTOR = "a[href^=\"/comic/\"]"
-        private const val CHAPTER_LINK_SELECTOR = "a[href*=\"/read/\"][data-chapter]"
-        private const val GENRE_CHECKBOX_SELECTOR = "input.bf-genre-cb[value]"
-        private const val PAGE_IMAGE_SELECTOR = "img[src*=\"/file/comic/\"]"
+        // Chapter links no longer carry data-chapter; the number is parsed from
+        // the href (/read/{slug}/chapter-N) via CHAPTER_NUMBER_REGEX.
+        private const val CHAPTER_LINK_SELECTOR = "a[href*=\"/read/\"]"
+        private const val GENRE_CHECKBOX_SELECTOR = "label.bf-genre-item input[value]"
+        // Reader pages moved to the lms.imgsvr.my.id CDN; keep the old path as fallback.
+        private const val PAGE_IMAGE_SELECTOR = "img[src*=\"lms.imgsvr.my.id\"], img[src*=\"/file/comic/\"]"
         private const val RATING_BADGE_SELECTOR = "span.text-amber-400"
 
         private val IMAGE_ATTRIBUTES = arrayOf("src", "data-src", "data-lazy-src")

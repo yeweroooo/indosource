@@ -8,6 +8,8 @@ import org.koitharu.kotatsu.parsers.config.ConfigKey
 import org.koitharu.kotatsu.parsers.core.PagedMangaParser
 import org.koitharu.kotatsu.parsers.model.ContentRating
 import org.koitharu.kotatsu.parsers.model.ContentType
+import org.koitharu.kotatsu.parsers.model.Favicon
+import org.koitharu.kotatsu.parsers.model.Favicons
 import org.koitharu.kotatsu.parsers.model.Manga
 import org.koitharu.kotatsu.parsers.model.MangaChapter
 import org.koitharu.kotatsu.parsers.model.MangaListFilter
@@ -27,6 +29,7 @@ import org.koitharu.kotatsu.parsers.util.json.getIntOrDefault
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.json.mapJSON
 import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
+import org.koitharu.kotatsu.parsers.util.parseHtml
 import org.koitharu.kotatsu.parsers.util.parseJson
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
@@ -35,27 +38,35 @@ import java.util.EnumSet
 import java.util.Locale
 
 /**
- * Shinigami Scans (https://11.shinigami.asia) — JSON API based source.
+ * Shinigami Scans (web app https://s1.shinigami.mx — old 11.shinigami.asia now
+ * only 302-redirects to a landing page) — JSON API based source.
  *
- * The website is a SvelteKit SPA; all data comes from the JSON API at
- * https://api.shngm.io/v1/:
+ * The website is a SPA; all data comes from the JSON API at
+ * https://api.shinigami.io/v1/ (the old api.shngm.io is dead, HTTP 502):
  *  - manga/list     — browse/search with filters (genre_include, format, type,
- *                     status, sort, sort_order, q, is_recommended, is_update)
+ *                     status, sort, sort_order, q, is_recommended). Offset-based
+ *                     pagination: pass offset=(page-1)*12, meta.has_next; the
+ *                     server clamps page_size to 12 and ignores `page`.
  *  - manga/detail/{id}
- *  - chapter/{id}/list  — chapters of a manga
+ *  - chapter/{id}/list  — chapters of a manga; CURSOR-based pagination:
+ *                     meta.next_cursor + meta.has_next (offset/page ignored),
+ *                     12 items per request max
  *  - chapter/detail/{id} — reader pages (base_url + chapter.path + image names)
- *  - genre/list, format/list, type/list — filter taxonomies
+ *  - taxonomy/list?type=genre&limit=100 — genre filter taxonomy (old
+ *    genre/list, type/list, format/list are 404 now)
  *
  * Manga links are /series/{manga_id}/, chapter links /chapter/{chapter_id}/.
+ * Chapter images on cdn.shinigami.gg are hotlink-open (no Referer needed).
  */
 public class ShinigamiParser(
     context: MangaLoaderContext,
 ) : PagedMangaParser(
     context = context,
     source = MangaParserSource.SHINIGAMI,
-    pageSize = 24,
+    pageSize = 12,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
+        "s1.shinigami.mx",
         "11.shinigami.asia",
         "shinigami.asia",
     )
@@ -65,6 +76,7 @@ public class ShinigamiParser(
         SortOrder.POPULARITY,
         SortOrder.POPULARITY_WEEK,
         SortOrder.RATING,
+        SortOrder.ALPHABETICAL,
         SortOrder.RELEVANCE,
     )
 
@@ -77,6 +89,37 @@ public class ShinigamiParser(
     override fun onCreateConfig(keys: MutableCollection<ConfigKey<*>>) {
         super.onCreateConfig(keys)
         keys.add(userAgentKey)
+    }
+
+    // The web app is a SPA whose index.html carries the real icons
+    // (<link rel="icon" href="/assets/favicon-*.png">, apple-touch-icon).
+    // Parse them at runtime so a new asset hash does not break the logo.
+    override suspend fun getFavicons(): Favicons {
+        val icons = mutableListOf<Favicon>()
+        runCatching {
+            val request = okhttp3.Request.Builder()
+                .url(baseUrl())
+                .addHeader(CommonHeaders.USER_AGENT, config[userAgentKey])
+                .tag(MangaSource::class.java, source)
+                .get()
+                .build()
+            val response = context.httpClient.newCall(request).await()
+            if (!response.isSuccessful) return@runCatching
+            val doc = response.parseHtml()
+            doc.select("link[rel~=(?i)icon]").forEach { link ->
+                val href = link.attr("href").trim().takeIf(String::isNotEmpty) ?: return@forEach
+                val size = link.attr("sizes").substringBefore('x').toIntOrNull() ?: 0
+                val rel = link.attr("rel").lowercase(Locale.ROOT)
+                icons.add(
+                    Favicon(
+                        href.toAbsoluteUrl(domain),
+                        size,
+                        if ("apple-touch-icon" in rel) "apple-touch-icon" else "icon",
+                    ),
+                )
+            }
+        }
+        return Favicons(icons, baseUrl())
     }
 
     override suspend fun getListPage(
@@ -145,19 +188,15 @@ public class ShinigamiParser(
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
         runCatching {
-            getJson("genre/list", emptyMap()).getJSONArray("data").mapJSONNotNull { item ->
-                val name = item.getStringOrNull("name") ?: return@mapJSONNotNull null
-                val slug = item.getStringOrNull("slug") ?: return@mapJSONNotNull null
-                MangaTag(name, slug, source)
-            }.filterTo(tags) { it.key !in TYPE_SLUGS }
+            getJson("taxonomy/list", mapOf("type" to "genre", "limit" to "100"))
+                .getJSONArray("data").mapJSONNotNull { item ->
+                    val name = item.getStringOrNull("name") ?: return@mapJSONNotNull null
+                    val slug = item.getStringOrNull("slug") ?: return@mapJSONNotNull null
+                    MangaTag(name, slug, source)
+                }.forEach(tags::add)
         }
-        runCatching {
-            getJson("type/list", emptyMap()).getJSONArray("data").mapJSONNotNull { item ->
-                val name = item.getStringOrNull("name") ?: return@mapJSONNotNull null
-                val slug = item.getStringOrNull("slug") ?: return@mapJSONNotNull null
-                MangaTag(name, slug, source)
-            }.filterTo(tags) { it.key in TYPE_SLUGS }
-        }
+        tags.add(MangaTag(TYPE_PROJECT_TITLE, TYPE_PROJECT, source))
+        tags.add(MangaTag(TYPE_MIRROR_TITLE, TYPE_MIRROR, source))
         tags.add(MangaTag(RECOMMENDED_TAG_TITLE, RECOMMENDED_TAG_KEY, source))
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
@@ -177,7 +216,7 @@ public class ShinigamiParser(
     }
 
     override suspend fun resolveLink(link: okhttp3.HttpUrl): Manga? {
-        val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("shinigami.to")
+        val allowedHosts = configKeyDomain.presetValues.toSet() + LEGACY_HOSTS
         if (link.host !in allowedHosts) return null
         val segments = link.pathSegments.filter(String::isNotBlank)
         if (segments.size != 2 || segments.first() != "series") return null
@@ -205,7 +244,8 @@ public class ShinigamiParser(
         filter: MangaListFilter,
     ): Map<String, String> {
         val params = LinkedHashMap<String, String>()
-        params["page"] = page.toString()
+        // Offset-based pagination: the API ignores `page` and clamps page_size to 12.
+        params["offset"] = ((page - 1) * pageSize).toString()
         params["page_size"] = pageSize.toString()
 
         filter.query?.takeIf(String::isNotBlank)?.let { params["q"] = it }
@@ -240,6 +280,7 @@ public class ShinigamiParser(
         SortOrder.POPULARITY -> "bookmark"
         SortOrder.POPULARITY_WEEK -> "rank"
         SortOrder.RATING -> "rating"
+        SortOrder.ALPHABETICAL -> "title"
         SortOrder.RELEVANCE -> "rank"
         else -> null
     }
@@ -311,17 +352,16 @@ public class ShinigamiParser(
 
     private suspend fun loadChapters(mangaId: String): List<MangaChapter> {
         val chapters = mutableListOf<MangaChapter>()
-        var page = 1
+        // Cursor-based pagination: meta.next_cursor + meta.has_next (page/offset
+        // are ignored on this endpoint; 12 items per request max).
+        var cursor: String? = null
         while (true) {
-            val json = getJson(
-                "chapter/$mangaId/list",
-                mapOf(
-                    "page" to page.toString(),
-                    "page_size" to "100",
-                    "sort_by" to "chapter_number",
-                    "sort_order" to "desc",
-                ),
-            )
+            val params = LinkedHashMap<String, String>()
+            params["page_size"] = "100"
+            params["sort_by"] = "chapter_number"
+            params["sort_order"] = "desc"
+            cursor?.let { params["cursor"] = it }
+            val json = getJson("chapter/$mangaId/list", params)
             val data = json.optJSONArray("data") ?: break
             data.mapJSONNotNull { item ->
                 val chapterId = item.getStringOrNull("chapter_id") ?: return@mapJSONNotNull null
@@ -342,10 +382,9 @@ public class ShinigamiParser(
                 )
             }.filterTo(chapters) { it.id != 0L }
 
-            val totalPage = json.optJSONObject("meta")?.getIntOrDefault("total_page", 1)
-                ?: 1
-            if (page >= totalPage || data.length() < 100) break
-            page++
+            val meta = json.optJSONObject("meta")
+            cursor = meta?.getStringOrNull("next_cursor")
+            if (meta?.optBoolean("has_next", false) != true || cursor.isNullOrBlank() || data.length() == 0) break
         }
         return chapters.sortedBy { it.number }
     }
@@ -393,14 +432,19 @@ public class ShinigamiParser(
     }
 
     private companion object {
-        private const val API_BASE_URL = "https://api.shngm.io/v1/"
+        private const val API_BASE_URL = "https://api.shinigami.io/v1/"
         private const val TYPE_PROJECT = "project"
         private const val TYPE_MIRROR = "mirror"
         private const val TYPE_PROJECT_TITLE = "Project"
         private const val TYPE_MIRROR_TITLE = "Mirror"
         private const val RECOMMENDED_TAG_KEY = "recommended"
         private const val RECOMMENDED_TAG_TITLE = "Rekomendasi"
-        private val TYPE_SLUGS = setOf(TYPE_PROJECT, TYPE_MIRROR)
+
+        // Old domains that only redirect now — still accepted in shared links.
+        private val LEGACY_HOSTS = setOf(
+            "11.shinigami.asia",
+            "shinigami.asia",
+        )
 
         private val FALLBACK_GENRES = listOf(
             "Action" to "action",

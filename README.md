@@ -7,14 +7,14 @@ Satu file `indosource.jar` berisi **13 sumber**:
 | Sumber | Domain utama | Teknik |
 |---|---|---|
 | MG Komik | web1.mgkomik.cc | HTML |
-| Shinigami | 11.shinigami.asia | JSON API |
+| Shinigami | s1.shinigami.mx | JSON API (api.shinigami.io/v1) |
 | Kiryuu | v7.kiryuu.to | HTML + admin-ajax |
 | APKOMIK | 01.apkomik.com | HTML (themesia mangastream) |
-| Voratoon | api.voratoon.com | JSON API (menggantikan Komikcast) |
+| Voratoon | 13.voratoon.com | HTML SSR (web frontend; API terenkripsi) |
 | IKIRU | 09.ikiru.wtf | JSON API + HTML |
-| Cosmic Toons | 02.cosmicscans.to | JSON API |
-| Komiknesia | v1.komiknesiaku.com | JSON API |
-| Westmanga | v1.westmanga.my | JSON API (signed) |
+| Cosmic Toons | cdncid.csmcscns.id | JSON API + token-minted images |
+| Komiknesia | v1.komiknesiaku.com | JSON API multi-host (api-be.komiknesia.* fallback; origin down 525 sejak 2026-11-26, pulih otomatis jika hidup kembali) |
+| Westmanga | v1.westmanga.top | JSON API same-origin + X-WM-Visit token (visit-token) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 | LumosKomik | 03.lumosgg.com | HTML (Astro SSR) |
 | MangaDex | api.mangadex.org | JSON API (Any Language / Multi-language) |
@@ -53,11 +53,11 @@ Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
 - Reader: halaman dari `lms.imgsvr.my.id`
 - Catatan: situs menanam **honeypot trap** (`/comic/honeypot-trap-*` yang mengarah ke `/api/honeypot/trap`, memban IP pengunjung) — parser memfilter slug ini sehingga tidak pernah dikunjungi
 
-**Voratoon** (portal `voratoon.id`, mirror web `v1`/`v2`/`v3`/`v8.voratoon.com`) adalah penerus backend Komikcast dengan API JSON yang sama — API dilayani dari `api.voratoon.com` (sejak 2026-10-14; `www.voratoon.com` mati). Didukung:
-- Browse + **search** (`?title=`) dan **filter lengkap**: 48 genre (multi-genre), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua), tipe **Project/Mirror**, tag **Hot/Recommended/Anime Adaptation**
-- Sort: terbaru, update, popularitas, rating, views
-- Detail: sinopsis, status, rating, genre, daftar chapter lengkap (urutan normal)
-- Reader: halaman dari `cdn.voratoon.com`, cover dari `cvr.voratoon.id` (URL presigned)
+**Voratoon** (portal `voratoon.id`, mirror web aktif `13.voratoon.com` / `voratoon.co`; `v3.voratoon.com` redirect ke `13`) adalah penerus backend Komikcast. API JSON di `api.voratoon.com` kini mengenkripsi seluruh respons (`{"encrypted":"v1.<iv>.<ct>.<hmac>"}`, key server-side) sehingga tidak bisa dipakai plugin — parser scraping frontend web Next.js yang fully server-rendered. Didukung:
+- Browse + **search** (`/browse?q=`) dan **filter lengkap**: 48 genre (multi-genre, `genre=action,fantasy`), status (ongoing/completed/hiatus/cancelled), format (manga/manhwa/manhua/mangatoon), tipe **Project/Mirror**, tag **Anime Adaptation**
+- Sort: latest update (default), new series, bookmark, popular, rating, A–Z
+- Detail: `/series/{slug}` — judul alternatif, sinopsis, status, rating, genre, author, daftar chapter lengkap (di-sort ascending)
+- Reader: `/series/{slug}/chapter/{n}` — halaman dari `cdn.voratoon.com` (wajib Referer web), cover dari `cvr.voratoon.id` (URL presigned)
 
 ---
 
@@ -107,7 +107,7 @@ Catatan: beberapa situs butuh koneksi internet normal dari Indonesia (beberapa d
 1. **Tidak ada akses ke data pribadi.** Plugin hanya membaca halaman web / API publik situs manga. Tidak ada permission Android tambahan selain internet, tidak ada telemetri, tidak ada tracker, tidak ada akses file/telepon/kontak.
 2. **Kode sumber terbuka.** Seluruh kode parser ada di folder [`src/`](src/) — siapa pun bisa mengauditnya.
 3. **Rilis transparan.** File `indosource.jar` di setiap Release dibuat dari kode di `src/` (Kotlin → fat jar → dex dengan d8). Tidak ada binary tersembunyi.
-4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, storage.westmanga.blog, api.ainzscans01.com, yuucdn.com, cdn.voratoon.com, cvr.voratoon.id, lms.imgsvr.my.id, dll). Tidak ada domain lain.
+4. **Jaringan hanya ke situs sumber.** Semua request hanya ke domain yang tercantum di tabel di atas beserta CDN gambarnya (sv1.imgkc1.my.id, cdn.uqni.net, cdnap.site, data.cdnesia.my.id, v1.westmanga.top, api.ainzscans01.com, yuucdn.com, cdn.voratoon.com, cvr.voratoon.id, lms.imgsvr.my.id, cdn.shinigami.gg, api.shinigami.io, dll). Tidak ada domain lain.
 5. **Berjalan di sandbox plugin.** Jar dimuat lewat PluginClassLoader aplikasi sebagai plugin, bukan aplikasi mandiri; aplikasi yang mengatur batasannya.
 
 Tetap jaga keamananmu: **hanya install dari repo ini** (release resmi), jangan install jar yang dibagikan orang lain di sembarang tempat.

@@ -29,9 +29,7 @@ import org.koitharu.kotatsu.parsers.network.CommonHeaders
 import org.koitharu.kotatsu.parsers.util.await
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
-import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
 import org.koitharu.kotatsu.parsers.util.parseJson
-import org.koitharu.kotatsu.parsers.util.parseJsonArray
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -67,6 +65,14 @@ import javax.crypto.spec.SecretKeySpec
  * (time/32).toFixed(8) padded/truncated to 32 chars, UTF-8 — mirrors the web
  * frontend's Decryptor (CryptoJS). The decrypted payload is the plain JSON this
  * parser was written against (verified live 2026-10-15).
+ *
+ * NOTE (2026-11-26): the primary API host api-be.komiknesia.my.id (and every
+ * other komiknesia zone) currently answers 525/521 — Cloudflare edge up, origin
+ * down (the origin nginx itself now 301-redirects to a parked domain). Nothing
+ * client-side can reach a dead origin, so this parser tries every known API
+ * host in order (API_HOSTS) and sticks to the first one that answers 2xx/4xx;
+ * 5xx and IO errors fall through to the next host, so the source recovers
+ * automatically if the service comes back on any of them.
  */
 public class KomiknesiaParser(
     context: MangaLoaderContext,
@@ -77,7 +83,10 @@ public class KomiknesiaParser(
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "v1.komiknesiaku.com",
+        "v2.komiknesiaku.com",
         "komiknesia.id",
+        "komiknesia.site",
+        "komiknesia.net",
         "02.komiknesia.asia",
         "03.komiknesia.asia",
         "id.komiknesia.net",
@@ -129,7 +138,7 @@ public class KomiknesiaParser(
         if (request.header(CommonHeaders.ORIGIN) == null) {
             builder.header(CommonHeaders.ORIGIN, ORIGIN_HEADER)
         }
-        if (!host.equals(API_HOST, ignoreCase = true)) {
+        if (API_HOSTS.none { host.equals(it, ignoreCase = true) }) {
             builder.header(CommonHeaders.REFERER, "${request.url.scheme}://$host/")
         }
         return chain.proceed(builder.build())
@@ -140,33 +149,33 @@ public class KomiknesiaParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val builder = "${API_BASE_URL}contents".toHttpUrl().newBuilder()
-        builder.addQueryParameter("page", page.toString())
-        builder.addQueryParameter("per_page", pageSize.toString())
+        val params = LinkedHashMap<String, String>()
+        params["page"] = page.toString()
+        params["per_page"] = pageSize.toString()
         filter.query?.takeIf(String::isNotBlank)?.let {
-            builder.addQueryParameter("q", it)
+            params["q"] = it
         }
         filter.tags.forEach { tag ->
             when (tag.key) {
-                PROJECT_TAG_KEY_TRUE -> builder.addQueryParameter("project", "true")
-                PROJECT_TAG_KEY_FALSE -> builder.addQueryParameter("project", "false")
-                SOURCE_TAG_KEY_KIRYU -> builder.addQueryParameter("source", "kiryu")
-                SOURCE_TAG_KEY_APKOMIK -> builder.addQueryParameter("source", "apkomik")
-                else -> builder.addQueryParameter("genre[]", tag.key)
+                PROJECT_TAG_KEY_TRUE -> params["project"] = "true"
+                PROJECT_TAG_KEY_FALSE -> params["project"] = "false"
+                SOURCE_TAG_KEY_KIRYU -> params["source"] = "kiryu"
+                SOURCE_TAG_KEY_APKOMIK -> params["source"] = "apkomik"
+                else -> params["genre[]"] = tag.key
             }
         }
         filter.types.firstNotNullOfOrNull(::typeToSite)?.let {
-            builder.addQueryParameter("type", it)
+            params["type"] = it
         }
         filter.states.firstNotNullOfOrNull(::stateToSite)?.let {
-            builder.addQueryParameter("status", it)
+            params["status"] = it
         }
         orderToQuery(order)?.let { (orderBy, popularWindow) ->
-            builder.addQueryParameter("orderBy", orderBy)
-            popularWindow?.let { builder.addQueryParameter("popularWindow", it) }
+            params["orderBy"] = orderBy
+            popularWindow?.let { params["popularWindow"] = it }
         }
 
-        val json = getJson(builder.build().toString())
+        val json = getJson("contents", params)
         val data = json.optJSONArray("data") ?: return emptyList()
         if (data.length() == 0) return emptyList()
         // Server clamps page to 200; requesting beyond silently returns page 200 again.
@@ -183,7 +192,7 @@ public class KomiknesiaParser(
     override suspend fun getDetails(manga: Manga): Manga {
         val slug = manga.url.removeSuffix("/").substringAfterLast('/')
         if (slug.isBlank()) return manga
-        val json = getJson("${API_BASE_URL}manga/slug/$slug")
+        val json = getJson("manga/slug/$slug", emptyMap())
         if (!json.has("id")) return manga
 
         val title = json.getStringOrNull("title") ?: manga.title
@@ -225,7 +234,7 @@ public class KomiknesiaParser(
         val slug = chapter.url.removeSuffix("/").substringAfterLast('/')
         if (slug.isBlank()) return emptyList()
         val json = try {
-            getJson("${API_BASE_URL}chapters/slug/$slug")
+            getJson("chapters/slug/$slug", emptyMap())
         } catch (e: org.json.JSONException) {
             return emptyList()
         }
@@ -250,7 +259,7 @@ public class KomiknesiaParser(
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
         runCatching {
-            val json = getJson("${API_BASE_URL}contents/genres")
+            val json = getJson("contents/genres", emptyMap())
             val data = json.optJSONArray("data") ?: return@runCatching
             for (i in 0 until data.length()) {
                 val item = data.optJSONObject(i) ?: continue
@@ -442,25 +451,50 @@ public class KomiknesiaParser(
         .trimEnd('/')
         .substringAfterLast('/')
 
-    private suspend fun getJson(url: String): JSONObject {
-        val request = Request.Builder()
-            .url(url)
-            .addHeader(CommonHeaders.ACCEPT, "application/json")
-            .addHeader(CommonHeaders.ORIGIN, ORIGIN_HEADER)
-            .tag(MangaSource::class.java, source)
-            .get()
-            .build()
-        val response = context.httpClient.newCall(request).await()
-        if (response.code in 400..599) {
-            val exception = org.jsoup.HttpStatusException(
-                response.message,
-                response.code,
-                response.request.url.toString(),
-            )
-            response.close()
-            throw exception
+    // First host that answers a non-5xx response wins; retried on every call
+    // until then, so a revived mirror is picked up automatically.
+    @Volatile
+    private var workingApiHost: String? = null
+
+    private suspend fun getJson(path: String, params: Map<String, String>): JSONObject {
+        val hosts = API_HOSTS.toList().sortedByDescending { it == workingApiHost }
+        var lastError: Exception? = null
+        for (host in hosts) {
+            val urlBuilder = "https://$host/api/".toHttpUrl().newBuilder()
+            urlBuilder.addPathSegments(path)
+            params.forEach { (key, value) -> urlBuilder.addQueryParameter(key, value) }
+            val request = Request.Builder()
+                .url(urlBuilder.build())
+                .addHeader(CommonHeaders.ACCEPT, "application/json")
+                .addHeader(CommonHeaders.ORIGIN, ORIGIN_HEADER)
+                .tag(MangaSource::class.java, source)
+                .get()
+                .build()
+            val response = try {
+                context.httpClient.newCall(request).await()
+            } catch (e: Exception) {
+                lastError = e
+                continue
+            }
+            // 5xx (incl. Cloudflare 521/525 when the origin is down) -> next host.
+            if (response.code in 500..599) {
+                lastError = org.jsoup.HttpStatusException(
+                    response.message, response.code, response.request.url.toString(),
+                )
+                response.close()
+                continue
+            }
+            if (response.code in 400..499) {
+                val exception = org.jsoup.HttpStatusException(
+                    response.message, response.code, response.request.url.toString(),
+                )
+                response.close()
+                throw exception
+            }
+            workingApiHost = host
+            return unwrapEnvelope(response.parseJson())
         }
-        return unwrapEnvelope(response.parseJson())
+        throw lastError ?: IllegalStateException("Komiknesia: no API host reachable")
     }
 
 
@@ -536,8 +570,15 @@ public class KomiknesiaParser(
     }
 
     private companion object {
-        private const val API_BASE_URL = "https://api-be.komiknesia.my.id/api/"
-        private const val API_HOST = "api-be.komiknesia.my.id"
+        // Known API hosts, tried in order until one answers non-5xx
+        // (primary died with a Cloudflare 525 on 2026-11-26; origin parked).
+        private val API_HOSTS = setOf(
+            "api-be.komiknesia.my.id",
+            "api-be.komiknesia.net",
+            "api-be.komiknesia.asia",
+            "proxy.komiknesia.net",
+            "api.komiknesiaku.com",
+        )
         private const val ORIGIN_HEADER = "https://v1.komiknesiaku.com"
         private const val MANGA_PATH = "komik"
 

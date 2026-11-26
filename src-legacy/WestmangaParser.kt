@@ -26,69 +26,47 @@ import org.koitharu.kotatsu.parsers.model.MangaTag
 import org.koitharu.kotatsu.parsers.model.RATING_UNKNOWN
 import org.koitharu.kotatsu.parsers.model.SortOrder
 import org.koitharu.kotatsu.parsers.network.CommonHeaders
-import org.koitharu.kotatsu.parsers.util.CryptoAES
 import org.koitharu.kotatsu.parsers.util.await
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.json.getStringOrNull
 import org.koitharu.kotatsu.parsers.util.json.mapJSONNotNull
 import org.koitharu.kotatsu.parsers.util.parseJson
 import org.koitharu.kotatsu.parsers.util.toAbsoluteUrl
-import java.security.MessageDigest
 import java.util.EnumSet
 import java.util.Locale
-import javax.crypto.Mac
-import javax.crypto.spec.SecretKeySpec
 
 /**
- * Westmanga (https://v1.westmanga.my) — signed JSON API source.
+ * Westmanga (web app https://v1.westmanga.top — v1.westmanga.my and
+ * westmanga.site are mirrors) — JSON API source, same-origin with the frontend.
  *
- * The website is a React Router v7 SPA (empty SSR shell, all content fetched
- * client-side) backed by a Laravel-style JSON API at https://data.mantweh.online/api/:
- *  - List/search/filter: GET /api/contents?page=N&per_page=40&project=false
+ * The old separate API host data.mantweh.online now serves a Cloudflare block
+ * page; the API moved to the web frontend itself:
+ *  - List/search/filter: GET /api/contents?page=N&per_page=25&project=false
  *                   &q={query}&genre[]={id}&status=Ongoing|Completed|Hiatus
  *                   &type=Comic|Novel&country=JP|KR|CN&orderBy=Az|Za|Update|Added|Popular
- *                   &color=Colored|Uncolored
+ *                   &color=Colored|Uncolored   (server clamps per_page to 25)
  *  - Genres:        GET /api/contents/genres        ({id, name}, filter by NUMERIC id)
  *  - Detail:        GET /api/comic/{slug}           (full manga, ALL chapters inline)
- *  - Reader:        GET /api/v/{chapterSlug}        (data.images[] = direct CDN URLs)
- *  - Config:        GET /api/framework/config       (unsigned; supplies accsesKey)
+ *  - Reader:        GET /api/v/{chapterSlug}        (data.images[] = /img/... paths)
  *
- * Every request (except config) needs 4 headers:
- *   x-wm-accses-key: WM_WEB_FRONT_END
- *   x-wm-request-time: <unix seconds>
- *   x-wm-request-signature: 64-hex HMAC (see below)
- *   Authorization: Bearer Bearer HAHAHA Jones   (static guest token)
- *
- * SIGNATURE FORMULA (cracked from the obfuscated bundle, verified 4/4 samples
- * incl. a fresh in-app capture):
- *   msg = time + "GET" + pathname + accsesKey + secret
- *   signature = HMAC-SHA256(key = msg, data = "wm-api-request") -> hex lowercase
- * The bundle calls CryptoJS.HmacSHA256("wm-api-request", msg) which is
- * (message, key) — so the KEY is the concatenated string and the hashed DATA
- * is the constant "wm-api-request". Signature covers PATHNAME ONLY (query
- * string excluded). TTL of a signature >= 180 s, so signing per request is fine.
- *
- * secret = CryptoJS-AES decrypt of a "Salted__" blob (passphrase in the bundle):
- *   AES.decrypt("U2FsdGVkX1/d15RGXgbiDR9ygJcJxQG6sP14ws+Uzzw=",
- *               "LuVwFghhgMGEbqptN4uY0osS45rQWHWxIZ+0oTb5jy8" x2) = "xxxoidj"
- * If the site rotates keys: re-extract the passphrase (Ob=...) and the salted
- * blob (fnbwJ) from the new bundle, update the two constants below — the
- * formula itself never changes.
- *
- * Image CDN storage.westmanga.blog is hotlink-open (verified HTTP 200 without
- * auth); covers come from the same host, so no per-host Referer rewrite is
- * needed for images.
+ * Bot gate ("Halamannya perlu dimuat ulang dulu ya." 403): before API calls,
+ * fetch GET /api/visit-token -> {"token": "v1....", "expires_at": <unix>} and
+ * send it as the `X-WM-Visit` header on every API request (cached 300 s; on a
+ * 403 carrying an X-WM-Visit-Error response header the token is refetched once
+ * and the request retried). The old x-wm-request-* HMAC headers are no longer
+ * required. Covers and reader images are relative /img/... paths on the same
+ * host and are hotlink-open (no Referer needed).
  */
 public class WestmangaParser(
     context: MangaLoaderContext,
 ) : PagedMangaParser(
     context = context,
     source = MangaParserSource.WESTMANGA,
-    pageSize = 40,
+    pageSize = 25,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
-        "v1.westmanga.my",
         "v1.westmanga.top",
+        "v1.westmanga.my",
         "westmanga.site",
     )
 
@@ -116,32 +94,20 @@ public class WestmangaParser(
         keys.add(userAgentKey)
     }
 
-    override fun getRequestHeaders(): Headers = Headers.Builder()
-        .add(CommonHeaders.USER_AGENT, config[userAgentKey])
-        .add(CommonHeaders.ACCEPT, "application/json")
-        .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
-        .add(CommonHeaders.AUTHORIZATION, GUEST_AUTH)
-        .add(CommonHeaders.REFERER, FRONTEND_URL)
-        .build()
+    override fun getRequestHeaders(): Headers = baseHeaders()
 
-    // Inject the per-request signed headers (time + signature are path/clock
-    // dependent, so they cannot live in getRequestHeaders). Signature covers
-    // the API pathname only; non-API hosts (image CDN) are left untouched.
+    // Make sure image/CDN requests carry the site Referer (harmless when the
+    // image host ignores it, required by hotlink-protected hosts).
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        val builder = request.newBuilder()
-        val host = request.url.host
-        if (host.equals(API_HOST, ignoreCase = true)) {
-            val pathname = request.url.encodedPath
-            val time = System.currentTimeMillis() / 1000
-            builder.header("x-wm-accses-key", ACCSES_KEY)
-            builder.header("x-wm-request-time", time.toString())
-            builder.header("x-wm-request-signature", sign(pathname, time))
-            builder.header(CommonHeaders.AUTHORIZATION, GUEST_AUTH)
-        } else if (request.header(CommonHeaders.REFERER) == null) {
-            builder.header(CommonHeaders.REFERER, FRONTEND_URL)
+        if (request.header(CommonHeaders.REFERER) == null && !request.url.encodedPath.startsWith("/api/")) {
+            return chain.proceed(
+                request.newBuilder()
+                    .header(CommonHeaders.REFERER, frontendUrl())
+                    .build(),
+            )
         }
-        return chain.proceed(builder.build())
+        return chain.proceed(request)
     }
 
     override suspend fun getListPage(
@@ -149,7 +115,7 @@ public class WestmangaParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val builder = "${API_BASE_URL}contents".toHttpUrl().newBuilder()
+        val builder = "${apiBaseUrl()}contents".toHttpUrl().newBuilder()
         builder.addQueryParameter("page", page.toString())
         builder.addQueryParameter("per_page", pageSize.toString())
         builder.addQueryParameter("project", "false")
@@ -189,7 +155,7 @@ public class WestmangaParser(
     override suspend fun getDetails(manga: Manga): Manga {
         val slug = manga.url.removeSuffix("/").substringAfterLast('/')
         if (slug.isBlank()) return manga
-        val json = getJson("${API_BASE_URL}comic/$slug")
+        val json = getJson("${apiBaseUrl()}comic/$slug")
         val data = json.optJSONObject("data") ?: return manga
         if (!data.has("id")) return manga
 
@@ -199,7 +165,7 @@ public class WestmangaParser(
             ?.mapNotNull { it.trim().takeIf(String::isNotEmpty) }
             ?.toSet()
             .orEmpty()
-        val cover = data.getStringOrNull("cover") ?: manga.coverUrl
+        val cover = absUrl(data.getStringOrNull("cover")) ?: manga.coverUrl
         val tags = parseGenres(data.optJSONArray("genres"))
         val chapters = data.optJSONArray("chapters")
             ?.let { array -> parseChapters(array) }
@@ -226,12 +192,12 @@ public class WestmangaParser(
     override suspend fun getPages(chapter: MangaChapter): List<MangaPage> {
         val chapterSlug = chapter.url.removeSuffix("/").substringAfterLast('/')
             .takeIf(String::isNotBlank) ?: return emptyList()
-        val json = getJson("${API_BASE_URL}v/$chapterSlug")
+        val json = getJson("${apiBaseUrl()}v/$chapterSlug")
         val data = json.optJSONObject("data") ?: return emptyList()
         val images = data.optJSONArray("images") ?: return emptyList()
         return buildList {
             for (i in 0 until images.length()) {
-                val url = images.optString(i).takeIf(String::isNotBlank) ?: continue
+                val url = absUrl(images.optString(i)) ?: continue
                 add(
                     MangaPage(
                         id = generateUid(source, "$chapterSlug#$i:$url"),
@@ -249,7 +215,7 @@ public class WestmangaParser(
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
         runCatching {
-            val json = getJson("${API_BASE_URL}contents/genres")
+            val json = getJson("${apiBaseUrl()}contents/genres")
             val data = json.optJSONArray("data") ?: return@runCatching
             for (i in 0 until data.length()) {
                 val item = data.optJSONObject(i) ?: continue
@@ -312,7 +278,7 @@ public class WestmangaParser(
         val slug = item.getStringOrNull("slug")?.takeIf(String::isNotBlank) ?: return null
         val title = item.getStringOrNull("title") ?: slug
         val relativeUrl = "/$MANGA_PATH/$slug/"
-        val cover = item.getStringOrNull("cover")
+        val cover = absUrl(item.getStringOrNull("cover"))
 
         return Manga(
             id = generateUid(source, relativeUrl),
@@ -441,14 +407,66 @@ public class WestmangaParser(
         .trimEnd('/')
         .substringAfterLast('/')
 
-    private suspend fun getJson(url: String): JSONObject {
+    // Covers and reader images come back as relative /img/... paths.
+    private fun absUrl(path: String?): String? {
+        if (path.isNullOrBlank()) return null
+        return if (path.startsWith("http://") || path.startsWith("https://")) {
+            path
+        } else {
+            "https://$domain$path"
+        }
+    }
+
+    private fun baseHeaders(): Headers = Headers.Builder()
+        .add(CommonHeaders.USER_AGENT, config[userAgentKey])
+        .add(CommonHeaders.ACCEPT, "application/json")
+        .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
+        .add(CommonHeaders.REFERER, frontendUrl())
+        .build()
+
+    private fun frontendUrl(): String = "https://$domain/"
+
+    private fun apiBaseUrl(): String = "https://$domain/api/"
+
+    // --- X-WM-Visit bot-gate token (cached 300 s, like the web app) ---
+    @Volatile
+    private var visitToken: String? = null
+
+    @Volatile
+    private var visitTokenAt: Long = 0L
+
+    private suspend fun currentVisitToken(forceRefresh: Boolean = false): String {
+        val nowSec = System.currentTimeMillis() / 1000
+        val cached = visitToken
+        if (!forceRefresh && cached != null && nowSec - visitTokenAt < 300) return cached
         val request = Request.Builder()
-            .url(url)
-            .addHeader(CommonHeaders.ACCEPT, "application/json")
+            .url("${apiBaseUrl()}visit-token")
+            .headers(baseHeaders())
             .tag(MangaSource::class.java, source)
             .get()
             .build()
         val response = context.httpClient.newCall(request).await()
+        if (response.code in 400..599) {
+            val exception = org.jsoup.HttpStatusException(
+                response.message, response.code, response.request.url.toString(),
+            )
+            response.close()
+            throw exception
+        }
+        val token = response.parseJson().optString("token").takeIf(String::isNotBlank)
+        response.close()
+        visitToken = token
+        visitTokenAt = nowSec
+        return token ?: throw IllegalStateException("Westmanga: visit-token response without token")
+    }
+
+    private suspend fun getJson(url: String): JSONObject {
+        var response = apiRequest(url, currentVisitToken())
+        if (response.code == 403 && response.header("X-WM-Visit-Error") != null) {
+            // Token rejected/expired — refetch once and retry.
+            response.close()
+            response = apiRequest(url, currentVisitToken(forceRefresh = true))
+        }
         if (response.code in 400..599) {
             val exception = org.jsoup.HttpStatusException(
                 response.message,
@@ -461,27 +479,22 @@ public class WestmangaParser(
         return response.parseJson()
     }
 
-    // HMAC-SHA256(key = msg, data = HMAC_DATA) -> 64 hex lowercase.
-    // Matches the bundle's CryptoJS.HmacSHA256(HMAC_DATA, msg) where CryptoJS
-    // arg order is (message, key).
-    private fun sign(pathname: String, time: Long): String {
-        val msg = "$time" + "GET" + pathname + ACCSES_KEY + secret
-        val mac = Mac.getInstance("HmacSHA256")
-        mac.init(SecretKeySpec(msg.toByteArray(Charsets.UTF_8), "HmacSHA256"))
-        val bytes = mac.doFinal(HMAC_DATA.toByteArray(Charsets.UTF_8))
-        val sb = StringBuilder(bytes.size * 2)
-        for (b in bytes) sb.append(String.format(Locale.ROOT, "%02x", b))
-        return sb.toString()
-    }
-
-    private val secret: String by lazy {
-        runCatching {
-            CryptoAES(context).decrypt(ENCRYPTED_SECRET, PASSPHRASE)
-        }.getOrElse {
-            // Failsafe: the already-decrypted value (bundle constant), in case
-            // the CryptoJS EVP_BytesToKey implementation ever diverges.
-            FALLBACK_SECRET
-        }
+    private suspend fun apiRequest(url: String, token: String): Response {
+        val request = Request.Builder()
+            .url(url)
+            .headers(
+                Headers.Builder()
+                    .add(CommonHeaders.USER_AGENT, config[userAgentKey])
+                    .add(CommonHeaders.ACCEPT, "application/json")
+                    .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
+                    .add(CommonHeaders.REFERER, frontendUrl())
+                    .add("X-WM-Visit", token)
+                    .build(),
+            )
+            .tag(MangaSource::class.java, source)
+            .get()
+            .build()
+        return context.httpClient.newCall(request).await()
     }
 
     private fun fallbackTags(): Set<MangaTag> = buildSet {
@@ -491,21 +504,7 @@ public class WestmangaParser(
     }
 
     private companion object {
-        private const val API_BASE_URL = "https://data.mantweh.online/api/"
-        private const val API_HOST = "data.mantweh.online"
-        private const val FRONTEND_URL = "https://v1.westmanga.my/"
         private const val MANGA_PATH = "comic"
-
-        private const val ACCSES_KEY = "WM_WEB_FRONT_END"
-        private const val GUEST_AUTH = "Bearer Bearer HAHAHA Jones"
-        private const val HMAC_DATA = "wm-api-request"
-
-        // CryptoJS AES "Salted__" blob + passphrase recovered from the bundle
-        // (fnbwJ / Ob). Rotation recipe in README — formula stays the same.
-        private const val ENCRYPTED_SECRET = "U2FsdGVkX1/d15RGXgbiDR9ygJcJxQG6sP14ws+Uzzw="
-        private const val PASSPHRASE = "LuVwFghhgMGEbqptN4uY0osS45rQWHWxIZ+0oTb5jy8" +
-            "LuVwFghhgMGEbqptN4uY0osS45rQWHWxIZ+0oTb5jy8"
-        private const val FALLBACK_SECRET = "xxxoidj"
 
         private const val COLOR_TAG_KEY_COLORED = "colored"
         private const val COLOR_TAG_TITLE_COLORED = "Colored"
