@@ -59,7 +59,7 @@ java -Xmx3g -cp "$DEP_DIR/kotlin-compiler.jar:$DEP_DIR/kotlin-stdlib.jar:$DEP_DI
   src/*.kt plugin/tsuki/model/MangaParserSource.kt plugin/tsuki/MangaParserFactory.kt
 
 # --- 2b) compile (B) legacy org.koitharu-style (app lama) -> out-legacy/ ---
-rm -rf "$OUT_DIR-2"
+rm -rf "${OUT_DIR}-legacy"
 java -Xmx3g -cp "$DEP_DIR/kotlin-compiler.jar:$DEP_DIR/kotlin-stdlib.jar:$DEP_DIR/coroutines.jar:$DEP_DIR/annotations.jar" \
   org.jetbrains.kotlin.cli.jvm.K2JVMCompiler \
   -no-stdlib -no-reflect -opt-in=org.koitharu.kotatsu.parsers.InternalParsersApi \

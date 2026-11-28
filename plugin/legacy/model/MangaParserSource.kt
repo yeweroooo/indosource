@@ -18,7 +18,6 @@ public enum class MangaParserSource(
     VORATOON("Voratoon", "id", ContentType.MANGA, false),
     IKIRU("IKIRU", "id", ContentType.MANGA, false),
     COSMICTOONS("Cosmic Toons", "id", ContentType.MANGA, false),
-    KOMIKNESIA("Komiknesia", "id", ContentType.MANGA, false),
     WESTMANGA("Westmanga", "id", ContentType.MANGA, false),
     AINZSCANS("Ainz Scans", "id", ContentType.MANGA, false),
     LUMOSKOMIK("LumosKomik", "id", ContentType.MANGA, false),

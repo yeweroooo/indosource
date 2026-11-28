@@ -2,7 +2,7 @@
 
 Plugin sumber manga Indonesia untuk aplikasi baca manga **Usagi** (dan aplikasi berbasis Kotatsu).
 
-Satu file `indosource.jar` berisi **13 sumber**:
+Satu file `indosource.jar` berisi **12 sumber**:
 
 | Sumber | Domain utama | Teknik |
 |---|---|---|
@@ -13,7 +13,6 @@ Satu file `indosource.jar` berisi **13 sumber**:
 | Voratoon | 13.voratoon.com | HTML SSR (web frontend; API terenkripsi) |
 | IKIRU | 09.ikiru.wtf | JSON API + HTML |
 | Cosmic Toons | cdncid.csmcscns.id | JSON API + token-minted images |
-| Komiknesia | v1.komiknesiaku.com | JSON API multi-host (api-be.komiknesia.* fallback; origin down 525 sejak 2026-11-26, pulih otomatis jika hidup kembali) |
 | Westmanga | v1.westmanga.top | JSON API same-origin + X-WM-Visit token (visit-token) |
 | Ainz Scans | v3.ainzscans01.com | JSON API |
 | LumosKomik | 03.lumosgg.com | HTML (Astro SSR) |
@@ -27,7 +26,7 @@ Format plugin: **dual-format** agar kompatibel dengan semua versi app Usagi:
 Struktur source:
 - `src/` — parser tsuki-style (package `org.koitharu.kotatsu.parsers.site.id`)
 - `src-legacy/` — parser org.koitharu-style (package `...site.id.legacy`)
-- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (13 sumber)
+- `plugin/tsuki/` + `plugin/legacy/` — enum `MangaParserSource` + `MangaParserFactoryKt` (12 sumber)
 
 Di-dex dengan d8 (min API 24), berjalan di sandbox plugin aplikasi.
 

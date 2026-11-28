@@ -9,7 +9,6 @@ import org.koitharu.kotatsu.parsers.site.id.legacy.CosmicToonsParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.IkiruParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.KiryuuParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.LumosKomikParser
-import org.koitharu.kotatsu.parsers.site.id.legacy.KomiknesiaParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.MGKomikParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.MangaDexParser
 import org.koitharu.kotatsu.parsers.site.id.legacy.ShinigamiParser
@@ -25,7 +24,6 @@ public fun newParser(source: MangaParserSource, context: MangaLoaderContext): Ma
         MangaParserSource.VORATOON -> VoratoonParser(context)
         MangaParserSource.IKIRU -> IkiruParser(context)
         MangaParserSource.COSMICTOONS -> CosmicToonsParser(context)
-        MangaParserSource.KOMIKNESIA -> KomiknesiaParser(context)
         MangaParserSource.WESTMANGA -> WestmangaParser(context)
         MangaParserSource.AINZSCANS -> AinzScansParser(context)
         MangaParserSource.LUMOSKOMIK -> LumosKomikParser(context)
