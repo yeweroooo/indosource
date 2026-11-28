@@ -662,7 +662,7 @@ public class MangaDexParser(
         val request = Request.Builder()
             .url(url)
             .addHeader(CommonHeaders.ACCEPT, "application/json")
-            .addHeader(CommonHeaders.USER_AGENT, config[userAgentKey])
+            .addHeader(CommonHeaders.USER_AGENT, MANGADEX_UA)
             .tag(MangaSource::class.java, source)
             .get()
             .build()
@@ -719,6 +719,9 @@ public class MangaDexParser(
     }
 
     private companion object {
+        // MangaDex memblokir browser User-Agent dengan 302 ke halaman challenge HTML.
+        // Selalu pakai non-browser UA untuk semua request API.
+        private const val MANGADEX_UA = "indosource/1.8 (manga reader plugin)"
         private const val MAX_CHAPTERS = 3000
         private const val FEED_PAGE_LIMIT = 500
 
