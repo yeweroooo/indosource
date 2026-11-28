@@ -419,9 +419,13 @@ public class WestmangaParser(
 
     private fun baseHeaders(): Headers = Headers.Builder()
         .add(CommonHeaders.USER_AGENT, config[userAgentKey])
-        .add(CommonHeaders.ACCEPT, "application/json")
+        .add(CommonHeaders.ACCEPT, "application/json, text/plain, */*")
         .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
         .add(CommonHeaders.REFERER, frontendUrl())
+        // Cloudflare bot gate: API requests MUST carry Sec-Fetch-Site: same-origin
+        .add("Sec-Fetch-Site", "same-origin")
+        .add("Sec-Fetch-Mode", "cors")
+        .add("Sec-Fetch-Dest", "empty")
         .build()
 
     private fun frontendUrl(): String = "https://$domain/"
@@ -485,9 +489,12 @@ public class WestmangaParser(
             .headers(
                 Headers.Builder()
                     .add(CommonHeaders.USER_AGENT, config[userAgentKey])
-                    .add(CommonHeaders.ACCEPT, "application/json")
+                    .add(CommonHeaders.ACCEPT, "application/json, text/plain, */*")
                     .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
                     .add(CommonHeaders.REFERER, frontendUrl())
+                    .add("Sec-Fetch-Site", "same-origin")
+                    .add("Sec-Fetch-Mode", "cors")
+                    .add("Sec-Fetch-Dest", "empty")
                     .add("X-WM-Visit", token)
                     .build(),
             )
