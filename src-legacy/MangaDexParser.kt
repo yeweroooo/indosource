@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.id.legacy
 
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,6 +30,7 @@ import org.koitharu.kotatsu.parsers.network.CommonHeaders
 import org.koitharu.kotatsu.parsers.util.await
 import org.koitharu.kotatsu.parsers.util.generateUid
 import org.koitharu.kotatsu.parsers.util.parseJson
+import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.EnumSet
 import java.util.Locale
@@ -631,7 +633,7 @@ public class MangaDexParser(
             .tag(MangaSource::class.java, source)
             .get()
             .build()
-        val response = context.httpClient.newCall(request).await()
+        val response = mangadexClient.newCall(request).await()
         if (response.code in 400..599) {
             val exception = org.jsoup.HttpStatusException(
                 response.message,
@@ -642,6 +644,29 @@ public class MangaDexParser(
             throw exception
         }
         return response.parseJson()
+    }
+
+    // OkHttpClient dengan custom DNS: domain *.mangadex.org di-resolve ke IP asli
+    // (45.129.229.1/2), bukan ke IP internet-positif (103.x.x.x). Domain lain
+    // tetap pakai system DNS. Ini mengatasi DNS poisoning dari ISP Indonesia.
+    private val mangadexClient: OkHttpClient by lazy {
+        context.httpClient.newBuilder()
+            .dns(MangaDexDns)
+            .build()
+    }
+
+    private object MangaDexDns : okhttp3.Dns {
+        private val MANGADEX_IPS = listOf(
+            InetAddress.getByAddress(byteArrayOf(45.toByte(), 129.toByte(), 229.toByte(), 1.toByte())),
+            InetAddress.getByAddress(byteArrayOf(45.toByte(), 129.toByte(), 229.toByte(), 2.toByte())),
+        )
+
+        override fun lookup(hostname: String): List<InetAddress> {
+            if (hostname.endsWith(".mangadex.org") || hostname == "mangadex.org") {
+                return MANGADEX_IPS
+            }
+            return okhttp3.Dns.SYSTEM.lookup(hostname)
+        }
     }
 
     private companion object {
