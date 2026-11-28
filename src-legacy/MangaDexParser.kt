@@ -686,8 +686,19 @@ public class MangaDexParser(
 
         override fun lookup(hostname: String): List<InetAddress> {
             if (hostname.endsWith(".mangadex.org") || hostname == "mangadex.org") {
+                // Internet-positif ISP mengembalikan IP block page (103.x.x.x / 2001:df...) dengan
+                // sukses (bukan UnknownHostException), sehingga fallback exception tidak pernah aktif.
+                // Filter IP yang mengandung oktet pertama 103 (IPv4) atau prefix 2001:df/2406:20c0
+                // (IPv6 block page), lalu kembalikan IP asli MangaDex.
                 return try {
-                    okhttp3.Dns.SYSTEM.lookup(hostname)
+                    val resolved = okhttp3.Dns.SYSTEM.lookup(hostname)
+                    val real = resolved.filterNot { addr ->
+                        val ip = addr.address
+                        if (ip.size == 4) ip[0] == 103.toByte()       // 103.0.0.0/8 = block page
+                        else addr.hostAddress.startsWith("2001:df") || // IPv6 block page ISP
+                             addr.hostAddress.startsWith("2406:20c0")
+                    }
+                    if (real.isNotEmpty()) real else MANGADEX_IPS
                 } catch (e: java.net.UnknownHostException) {
                     MANGADEX_IPS
                 }
