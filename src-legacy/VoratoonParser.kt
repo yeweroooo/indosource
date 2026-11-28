@@ -108,6 +108,10 @@ public class VoratoonParser(
     override fun getRequestHeaders(): Headers = Headers.Builder()
         .add(CommonHeaders.USER_AGENT, config[userAgentKey])
         .add(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
+        .add(CommonHeaders.ACCEPT, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
+        .add("Sec-Fetch-Dest", "document")
+        .add("Sec-Fetch-Mode", "navigate")
+        .add("Sec-Fetch-Site", "same-origin")
         .build()
 
     // The parser is also registered as an Interceptor in the app's HTTP pipeline.
@@ -119,12 +123,18 @@ public class VoratoonParser(
         val request = chain.request()
         val host = request.url.host
         if (host.endsWith(".voratoon.com") || host.endsWith(".voratoon.id") || host == "voratoon.id" || host == "voratoon.co") {
-            return chain.proceed(
-                request.newBuilder()
-                    .header(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
-                    .header(CommonHeaders.USER_AGENT, config[userAgentKey])
-                    .build(),
-            )
+            val isImage = IMAGE_EXT_REGEX.containsMatchIn(request.url.encodedPath)
+            val builder = request.newBuilder()
+                .header(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
+                .header(CommonHeaders.USER_AGENT, config[userAgentKey])
+            if (isImage) {
+                builder
+                    .header(CommonHeaders.ACCEPT, "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
+                    .header("Sec-Fetch-Dest", "image")
+                    .header("Sec-Fetch-Mode", "no-cors")
+                    .header("Sec-Fetch-Site", "same-site")
+            }
+            return chain.proceed(builder.build())
         }
         return chain.proceed(request)
     }
@@ -420,6 +430,7 @@ public class VoratoonParser(
     }
 
     private companion object {
+        private val IMAGE_EXT_REGEX = Regex("\\.(jpg|jpeg|png|webp|gif|avif)(\\?.*)?$", RegexOption.IGNORE_CASE)
         private const val HTML_ACCEPT =
             "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 
