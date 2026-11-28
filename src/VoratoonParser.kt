@@ -67,8 +67,8 @@ public class VoratoonParser(
     pageSize = 30,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
-        "13.voratoon.com",
         "voratoon.co",
+        "13.voratoon.com",
         "v3.voratoon.com",
     )
 
@@ -417,7 +417,12 @@ public class VoratoonParser(
     private fun documentHeaders(): Headers = Headers.Builder()
         .add(CommonHeaders.USER_AGENT, config[userAgentKey])
         .add(CommonHeaders.ACCEPT, HTML_ACCEPT)
+        .add(CommonHeaders.ACCEPT_LANGUAGE, "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7")
         .add(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
+        .add("Sec-Fetch-Dest", "document")
+        .add("Sec-Fetch-Mode", "navigate")
+        .add("Sec-Fetch-Site", "same-origin")
+        .add("Upgrade-Insecure-Requests", "1")
         .build()
 
     private fun baseUrl(): String = "https://$domain/"
