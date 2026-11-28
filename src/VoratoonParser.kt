@@ -101,25 +101,28 @@ public class VoratoonParser(
         "https://$domain/",
     )
 
-    // Reader images on cdn.voratoon.com are hotlink-protected: they return 403
-    // without a Referer. The app merges getRequestHeaders() into every request
-    // for this source (including reader page fetches), so advertise the web
-    // frontend referer here — otherwise the chapter pages never load.
+    // Reader images on cdn.voratoon.com are hotlink-protected by Cloudflare:
+    // they return 403 "Attention Required" without a Referer header. The app
+    // merges getRequestHeaders() into every request for this source (including
+    // reader page fetches), so advertise the web frontend referer here.
     override fun getRequestHeaders(): Headers = Headers.Builder()
         .add(CommonHeaders.USER_AGENT, config[userAgentKey])
         .add(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
         .build()
 
-    // Belt and suspenders: the parser is also registered as an Interceptor in
-    // the app's HTTP pipeline, so inject the referer directly at request time.
-    // This covers app builds that do not merge getRequestHeaders() into reader
-    // page fetches.
+    // The parser is also registered as an Interceptor in the app's HTTP pipeline.
+    // Force the Referer on ALL voratoon-related hosts (web mirrors + CDN) so that
+    // chapter images on cdn.vratoon.com and covers on cvr.voratoon.id load even
+    // when the app's image loader uses a separate OkHttpClient that bypasses
+    // getRequestHeaders() — as long as it still routes through this interceptor.
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        if (request.header(CommonHeaders.REFERER) == null) {
+        val host = request.url.host
+        if (host.endsWith(".voratoon.com") || host.endsWith(".voratoon.id") || host == "voratoon.id" || host == "voratoon.co") {
             return chain.proceed(
                 request.newBuilder()
                     .header(CommonHeaders.REFERER, baseUrl().removeSuffix("/"))
+                    .header(CommonHeaders.USER_AGENT, config[userAgentKey])
                     .build(),
             )
         }
