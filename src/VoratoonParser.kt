@@ -112,6 +112,9 @@ public class VoratoonParser(
         .add("Sec-Fetch-Dest", "document")
         .add("Sec-Fetch-Mode", "navigate")
         .add("Sec-Fetch-Site", "same-origin")
+        .add("sec-ch-ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+        .add("sec-ch-ua-mobile", "?1")
+        .add("sec-ch-ua-platform", "\"Android\"")
         .build()
 
     // The parser is also registered as an Interceptor in the app's HTTP pipeline.
@@ -422,7 +425,11 @@ public class VoratoonParser(
         .add("Sec-Fetch-Dest", "document")
         .add("Sec-Fetch-Mode", "navigate")
         .add("Sec-Fetch-Site", "same-origin")
+        .add("Sec-Fetch-User", "?1")
         .add("Upgrade-Insecure-Requests", "1")
+        .add("sec-ch-ua", "\"Not_A Brand\";v=\"8\", \"Chromium\";v=\"120\", \"Google Chrome\";v=\"120\"")
+        .add("sec-ch-ua-mobile", "?1")
+        .add("sec-ch-ua-platform", "\"Android\"")
         .build()
 
     private fun baseUrl(): String = "https://$domain/"
