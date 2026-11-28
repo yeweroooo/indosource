@@ -1,6 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.id
 
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.json.JSONObject
@@ -95,7 +96,7 @@ public class ApKomikParser(
                 "${baseUrl()}page/$page/?s=${query.urlEncoded()}"
             }
         } else {
-            val builder = "${baseUrl()}manga/".toHttpUrlOrNull()!!.newBuilder()
+            val builder = "${baseUrl()}manga/".toHttpUrl().newBuilder()
             builder.addQueryParameter("order", orderToQuery(order))
             filter.tags.forEach { tag ->
                 if (tag.key.isNotBlank() && tag.key.all(Char::isDigit)) {
@@ -190,9 +191,15 @@ public class ApKomikParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val url = "${baseUrl()}manga/"
             val document = getHtml(url, documentHeaders(url))
             val form = document.selectFirst("form.filters") ?: return@runCatching
@@ -205,6 +212,7 @@ public class ApKomikParser(
                 }
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
             availableStates = EnumSet.of(
@@ -417,9 +425,9 @@ public class ApKomikParser(
 
     private fun parseChapterDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { (pattern, locale) ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                SimpleDateFormat(pattern, locale).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -544,13 +552,13 @@ public class ApKomikParser(
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val CHAPTER_URL_REGEX = Regex("^(.+)-chapter-([0-9]+(?:\\.[0-9]+)?)-bahasa-indonesia$")
         private val CHAPTER_NUMBER_REGEX = Regex("(?:chapter|chap|ch\\.?|episode|ep\\.?)\\s*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE)
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "MMMM d, yyyy" to Locale("id", "ID"),
             "MMMM dd, yyyy" to Locale("id", "ID"),
             "d MMMM yyyy" to Locale("id", "ID"),
             "MMMM d, yyyy" to Locale.US,
             "yyyy-MM-dd'T'HH:mm:ss" to Locale.US,
-        )
+        ).map { (pattern, locale) -> SimpleDateFormat(pattern, locale) }.toTypedArray()
 
         private val FALLBACK_GENRES = listOf(
             "Action" to "14",

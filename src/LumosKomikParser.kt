@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.id
 
 import okhttp3.Headers
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.json.JSONArray
@@ -87,7 +88,7 @@ public class LumosKomikParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val builder = "${baseUrl()}browse".toHttpUrlOrNull()!!.newBuilder()
+        val builder = "${baseUrl()}browse".toHttpUrl().newBuilder()
         if (page > 1) builder.addQueryParameter("page", page.toString())
         filter.query?.takeIf(String::isNotBlank)?.let { builder.addQueryParameter("q", it) }
         builder.addQueryParameter("sort", orderToSite(order))
@@ -177,15 +178,22 @@ public class LumosKomikParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val document = getHtml("${baseUrl()}browse", documentHeaders(baseUrl()))
             document.select(GENRE_CHECKBOX_SELECTOR).forEach { checkbox ->
                 val slug = checkbox.attrOrNull("value")?.takeIf(String::isNotBlank) ?: return@forEach
                 tags.add(MangaTag(genreTitle(slug), slug, source))
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         return MangaListFilterOptions(
             availableTags = tags.toList().sortedBy { it.title.lowercase(Locale.ROOT) }.toSet(),
             availableStates = EnumSet.of(
@@ -496,11 +504,12 @@ public class LumosKomikParser(
         private const val HONEYPOT_PREFIX = "honeypot"
         private val ACRONYMS = listOf("4-koma", "sci-fi", "bl", "gl")
 
+        private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
         private val CHAPTER_NUMBER_REGEX =
             Regex("(?:chapter|chap|ch\\.?)[-_ ]*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE)
 
         private fun String.slugify(): String = lowercase(Locale.ROOT)
-            .replace(Regex("[^a-z0-9]+"), "-")
+            .replace(NON_ALNUM_REGEX, "-")
             .trim('-')
     }
 }

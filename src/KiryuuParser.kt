@@ -152,9 +152,15 @@ public class KiryuuParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val searchTerms = parseSearchTerms()
             searchTerms.optJSONArray("genre")?.let { arr ->
                 for (i in 0 until arr.length()) {
@@ -165,6 +171,7 @@ public class KiryuuParser(
                 }
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         tags.add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
@@ -361,9 +368,9 @@ public class KiryuuParser(
 
     private fun parseChapterDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                SimpleDateFormat(pattern, Locale.US).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -437,7 +444,7 @@ public class KiryuuParser(
         .ifBlank { "Kiryuu" }
 
     private fun String.slugify(): String = lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "-")
+        .replace(NON_ALNUM_REGEX, "-")
         .trim('-')
 
     private suspend fun parseSearchTerms(): JSONObject {
@@ -538,12 +545,13 @@ public class KiryuuParser(
             "srcset",
             "src",
         )
+        private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val CHAPTER_NUMBER_REGEX = Regex("(?:chapter|chap|ch\\.?|episode|ep\\.?)\\s*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE)
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
-        )
+        ).map { SimpleDateFormat(it, Locale.US) }.toTypedArray()
 
         private val FALLBACK_GENRES = listOf(
             "Action" to "action",

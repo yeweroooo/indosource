@@ -2,6 +2,7 @@ package org.koitharu.kotatsu.parsers.site.id
 
 import okhttp3.Headers
 import okhttp3.HttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.Request
 import org.json.JSONArray
@@ -89,7 +90,7 @@ public class IkiruParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val builder = "${baseUrl()}api/v1/series".toHttpUrlOrNull()!!.newBuilder()
+        val builder = "${baseUrl()}api/v1/series".toHttpUrl().newBuilder()
         builder.addQueryParameter("page", page.toString())
         builder.addQueryParameter("limit", pageSize.toString())
 
@@ -315,9 +316,15 @@ public class IkiruParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val json = getJson("${baseUrl()}api/v1/genres")
             val arr = json.optJSONArray("data")
             if (arr != null) {
@@ -329,6 +336,7 @@ public class IkiruParser(
                 }
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         return MangaListFilterOptions(
             availableTags = tags.ifEmpty { fallbackTags() },
             availableStates = EnumSet.of(
@@ -410,9 +418,9 @@ public class IkiruParser(
 
     private fun parseIsoDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                SimpleDateFormat(pattern, Locale.US).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -425,7 +433,7 @@ public class IkiruParser(
         .ifBlank { "IKIRU" }
 
     private fun String.slugify(): String = lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "-")
+        .replace(NON_ALNUM_REGEX, "-")
         .trim('-')
 
     private fun baseUrl(): String = "https://$domain/"
@@ -479,14 +487,16 @@ public class IkiruParser(
     private companion object {
         private const val HTML_ACCEPT = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8"
 
-        private val DATE_FORMATS = arrayOf(
+        private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
+
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
             "yyyy-MM-dd'T'HH:mm:ss",
             "yyyy-MM-dd",
-        )
+        ).map { SimpleDateFormat(it, Locale.US) }.toTypedArray()
 
         private val FALLBACK_GENRES = listOf(
             "Action", "Adult", "Adventure", "Bocil", "Business", "Comedy",

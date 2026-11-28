@@ -6,6 +6,8 @@ import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import tsuki.MangaLoaderContext
@@ -212,9 +214,15 @@ public class WestmangaParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val json = getJson("${apiBaseUrl()}contents/genres")
             val data = json.optJSONArray("data") ?: return@runCatching
             for (i in 0 until data.length()) {
@@ -225,6 +233,7 @@ public class WestmangaParser(
                 tags.add(MangaTag(name, id.toString(), source))
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         tags.add(MangaTag(COLOR_TAG_TITLE_COLORED, COLOR_TAG_KEY_COLORED, source))
         tags.add(MangaTag(COLOR_TAG_TITLE_UNCOLORED, COLOR_TAG_KEY_UNCOLORED, source))
         return MangaListFilterOptions(
@@ -433,36 +442,49 @@ public class WestmangaParser(
 
     private fun apiBaseUrl(): String = "https://$domain/api/"
 
-    // --- X-WM-Visit bot-gate token (cached 300 s, like the web app) ---
-    @Volatile
-    private var visitToken: String? = null
+    // --- X-WM-Visit bot-gate token (cached until the server-declared expires_at) ---
+    private data class VisitToken(
+        val token: String,
+        val expiresAtSec: Long,
+    )
 
     @Volatile
-    private var visitTokenAt: Long = 0L
+    private var cachedVisitToken: VisitToken? = null
+
+    private val visitTokenMutex = Mutex()
 
     private suspend fun currentVisitToken(forceRefresh: Boolean = false): String {
-        val nowSec = System.currentTimeMillis() / 1000
-        val cached = visitToken
-        if (!forceRefresh && cached != null && nowSec - visitTokenAt < 300) return cached
-        val request = Request.Builder()
-            .url("${apiBaseUrl()}visit-token")
-            .headers(baseHeaders())
-            .tag(MangaSource::class.java, source)
-            .get()
-            .build()
-        val response = context.httpClient.newCall(request).await()
-        if (response.code in 400..599) {
-            val exception = org.jsoup.HttpStatusException(
-                response.message, response.code, response.request.url.toString(),
-            )
-            response.close()
-            throw exception
+        fun isFresh(t: VisitToken?): Boolean {
+            // Refresh 30 s before expiry to avoid racing the server-side cutoff.
+            return t != null && System.currentTimeMillis() / 1000 < t.expiresAtSec - 30
         }
-        val token = response.parseJson().optString("token").takeIf(String::isNotBlank)
-        response.close()
-        visitToken = token
-        visitTokenAt = nowSec
-        return token ?: throw IllegalStateException("Westmanga: visit-token response without token")
+        if (!forceRefresh && isFresh(cachedVisitToken)) return cachedVisitToken!!.token
+        return visitTokenMutex.withLock {
+            // Re-check under the lock so concurrent callers do not thrash refreshes.
+            if (!forceRefresh && isFresh(cachedVisitToken)) return cachedVisitToken!!.token
+            val request = Request.Builder()
+                .url("${apiBaseUrl()}visit-token")
+                .headers(baseHeaders())
+                .tag(MangaSource::class.java, source)
+                .get()
+                .build()
+            val response = context.httpClient.newCall(request).await()
+            if (response.code in 400..599) {
+                val exception = org.jsoup.HttpStatusException(
+                    response.message, response.code, response.request.url.toString(),
+                )
+                response.close()
+                throw exception
+            }
+            val body = response.parseJson()
+            response.close()
+            val token = body.optString("token").takeIf(String::isNotBlank)
+                ?: throw IllegalStateException("Westmanga: visit-token response without token")
+            val nowSec = System.currentTimeMillis() / 1000
+            val expiresAt = body.optLong("expires_at", 0L).takeIf { it > 0L } ?: (nowSec + 300)
+            cachedVisitToken = VisitToken(token, expiresAt)
+            token
+        }
     }
 
     private suspend fun getJson(url: String): JSONObject {

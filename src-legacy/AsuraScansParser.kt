@@ -260,9 +260,15 @@ public class AsuraScansParser(
         return getDetails(seed)
     }
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val dynamicTags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            dynamicTags.addAll(cached)
+        } else runCatching {
             val json = getJson("${apiBaseUrl()}/api/genres")
             val data = json.optJSONArray("data")
             if (data != null) {
@@ -277,6 +283,7 @@ public class AsuraScansParser(
             }
         }
 
+        if (dynamicTags.isNotEmpty()) cachedRemoteTags = dynamicTags.toSet()
         val tags = if (dynamicTags.isNotEmpty()) {
             dynamicTags
         } else {
@@ -441,11 +448,9 @@ public class AsuraScansParser(
 
     private fun parseIsoDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                val sdf = SimpleDateFormat(pattern, Locale.US)
-                sdf.timeZone = TimeZone.getTimeZone("UTC")
-                sdf.parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -499,14 +504,14 @@ public class AsuraScansParser(
     private companion object {
         private val PAGE_IMAGE_PATTERN = Pattern.compile("https://cdn\\.asurascans\\.com/asura-images/chapters/[^\"'\\\\&\\s]+\\.(?:webp|jpg|jpeg|png)")
 
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSSSSSXXX",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
             "yyyy-MM-dd'T'HH:mm:ss",
             "yyyy-MM-dd",
-        )
+        ).map { SimpleDateFormat(it, Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") } }.toTypedArray()
 
         private val ALL_GENRES = listOf(
             "Action" to "action",

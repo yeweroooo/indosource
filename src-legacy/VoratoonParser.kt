@@ -2,7 +2,7 @@ package org.koitharu.kotatsu.parsers.site.id.legacy
 
 import okhttp3.Headers
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
@@ -134,7 +134,7 @@ public class VoratoonParser(
         order: SortOrder,
         filter: MangaListFilter,
     ): List<Manga> {
-        val builder = "${baseUrl()}browse".toHttpUrlOrNull()!!.newBuilder()
+        val builder = "${baseUrl()}browse".toHttpUrl().newBuilder()
         builder.addQueryParameter("page", page.toString())
         filter.query?.takeIf(String::isNotBlank)?.let {
             builder.addQueryParameter("q", it)
@@ -276,9 +276,15 @@ public class VoratoonParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val document = getHtml("${baseUrl()}browse")
             document.select("button.genre-box").forEach { box ->
                 val name = box.textOrNull()?.trim()?.takeIf(String::isNotEmpty) ?: return@forEach
@@ -286,6 +292,7 @@ public class VoratoonParser(
                 tags.add(MangaTag(name, name, source))
             }
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         tags.add(MangaTag(PROJECT_TAG_TITLE, PROJECT_TAG_KEY, source))
         tags.add(MangaTag(MIRROR_TAG_TITLE, MIRROR_TAG_KEY, source))
         tags.add(MangaTag(ANIME_TAG_TITLE, ANIME_TAG_KEY, source))

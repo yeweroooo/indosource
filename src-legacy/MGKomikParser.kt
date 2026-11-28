@@ -177,8 +177,14 @@ public class MGKomikParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url.toAbsoluteUrl(domain)
 
-    override suspend fun getFilterOptions(): MangaListFilterOptions = MangaListFilterOptions(
-        availableTags = fetchGenres(),
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
+    override suspend fun getFilterOptions(): MangaListFilterOptions {
+        val cached = cachedRemoteTags
+        val tags = cached ?: fetchRemoteGenres().also { if (it.isNotEmpty()) cachedRemoteTags = it }
+        return MangaListFilterOptions(
+            availableTags = tags.ifEmpty { fallbackTags() },
         availableStates = EnumSet.of(
             MangaState.ONGOING,
             MangaState.FINISHED,
@@ -191,7 +197,8 @@ public class MGKomikParser(
         ),
         availableContentRating = EnumSet.of(ContentRating.SAFE, ContentRating.SUGGESTIVE),
         availableLocales = setOf(Locale("id")),
-    )
+        )
+    }
 
     override suspend fun resolveLink(link: HttpUrl): Manga? {
         val allowedHosts = configKeyDomain.presetValues.toSet() + setOf("mgkomik.id")
@@ -424,9 +431,9 @@ public class MGKomikParser(
         if (lower.startsWith("yesterday") || lower.startsWith("kemarin")) {
             return Calendar.getInstance().apply { add(Calendar.DAY_OF_MONTH, -1) }.startOfDay().timeInMillis
         }
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             try {
-                SimpleDateFormat(pattern, Locale.US).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             } catch (_: ParseException) {
                 null
             }
@@ -504,7 +511,7 @@ public class MGKomikParser(
         .ifBlank { "MG Komik" }
 
     private fun String.slugify(): String = lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "-")
+        .replace(NON_ALNUM_REGEX, "-")
         .trim('-')
 
     private fun baseUrl(): String = "https://$domain/"
@@ -538,20 +545,19 @@ public class MGKomikParser(
         return response
     }
 
-    private suspend fun fetchGenres(): Set<MangaTag> {
+    private suspend fun fetchRemoteGenres(): Set<MangaTag> {
         return try {
             val url = searchUrl(page = 1, order = SortOrder.RELEVANCE, filter = MangaListFilter.EMPTY)
             val document = getHtml(url, documentHeaders(baseUrl()))
-            val tags = document.select("input.genre-checkbox").mapNotNull { input ->
+            document.select("input.genre-checkbox").mapNotNull { input ->
                 val key = input.attrOrNull("value")?.trim()?.takeIf(String::isNotBlank) ?: return@mapNotNull null
                 if (key.contains("ago", ignoreCase = true)) return@mapNotNull null
                 val title = input.nextElementSibling()?.textOrNull()?.trim()?.takeIf(String::isNotBlank)
                     ?: return@mapNotNull null
                 MangaTag(title, key, source)
             }.toSet()
-            tags.ifEmpty { fallbackTags() }
         } catch (e: Exception) {
-            fallbackTags()
+            emptySet()
         }
     }
 
@@ -580,14 +586,15 @@ public class MGKomikParser(
         private val WHITESPACE_REGEX = Regex("\\s+")
         private val RATING_REGEX = Regex("(?:Average\\s*)?([0-5](?:\\.\\d+)?)\\s*/\\s*5|Average\\s+([0-5](?:\\.\\d+)?)", RegexOption.IGNORE_CASE)
         private val CHAPTER_NUMBER_REGEX = Regex("(?:chapter|chap|ch\\.?|episode|ep\\.?)\\s*([0-9]+(?:\\.[0-9]+)?)", RegexOption.IGNORE_CASE)
+        private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
         private val RELATIVE_NUMBER_REGEX = Regex("\\d+")
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "dd MMM yy",
             "dd MMM yyyy",
             "d MMM yy",
             "d MMM yyyy",
             "MMMM dd, yyyy",
-        )
+        ).map { SimpleDateFormat(it, Locale.US) }.toTypedArray()
         private val FALLBACK_GENRES = listOf(
             "Action" to "action",
             "Adaptation" to "adaptation",

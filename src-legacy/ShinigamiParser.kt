@@ -104,7 +104,10 @@ public class ShinigamiParser(
                 .get()
                 .build()
             val response = context.httpClient.newCall(request).await()
-            if (!response.isSuccessful) return@runCatching
+            if (!response.isSuccessful) {
+                response.close()
+                return@runCatching
+            }
             val doc = response.parseHtml()
             doc.select("link[rel~=(?i)icon]").forEach { link ->
                 val href = link.attr("href").trim().takeIf(String::isNotEmpty) ?: return@forEach
@@ -185,9 +188,15 @@ public class ShinigamiParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             getJson("taxonomy/list", mapOf("type" to "genre", "limit" to "100"))
                 .getJSONArray("data").mapJSONNotNull { item ->
                     val name = item.getStringOrNull("name") ?: return@mapJSONNotNull null
@@ -195,6 +204,7 @@ public class ShinigamiParser(
                     MangaTag(name, slug, source)
                 }.forEach(tags::add)
         }
+        if (tags.isNotEmpty()) cachedRemoteTags = tags.toSet()
         tags.add(MangaTag(TYPE_PROJECT_TITLE, TYPE_PROJECT, source))
         tags.add(MangaTag(TYPE_MIRROR_TITLE, TYPE_MIRROR, source))
         tags.add(MangaTag(RECOMMENDED_TAG_TITLE, RECOMMENDED_TAG_KEY, source))
@@ -355,7 +365,8 @@ public class ShinigamiParser(
         // Cursor-based pagination: meta.next_cursor + meta.has_next (page/offset
         // are ignored on this endpoint; 12 items per request max).
         var cursor: String? = null
-        while (true) {
+        var pageCount = 0
+        while (pageCount++ < MAX_CHAPTER_PAGES) {
             val params = LinkedHashMap<String, String>()
             params["page_size"] = "100"
             params["sort_by"] = "chapter_number"
@@ -408,13 +419,23 @@ public class ShinigamiParser(
             .tag(MangaSource::class.java, source)
             .get()
             .build()
-        return context.httpClient.newCall(request).await().parseJson()
+        val response = context.httpClient.newCall(request).await()
+        if (response.code in 400..599) {
+            val exception = org.jsoup.HttpStatusException(
+                response.message,
+                response.code,
+                response.request.url.toString(),
+            )
+            response.close()
+            throw exception
+        }
+        return response.parseJson()
     }
 
     private fun parseDate(raw: String?): Long {
         if (raw.isNullOrBlank()) return 0L
         return runCatching {
-            SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).parse(raw.substringBefore('Z'))?.time
+            synchronized(RELEASE_DATE_FORMAT) { RELEASE_DATE_FORMAT.parse(raw.substringBefore('Z')) }?.time
                 ?: 0L
         }.getOrDefault(0L)
     }
@@ -433,6 +454,9 @@ public class ShinigamiParser(
 
     private companion object {
         private const val API_BASE_URL = "https://api.shinigami.io/v1/"
+        private const val MAX_CHAPTER_PAGES = 500
+
+        private val RELEASE_DATE_FORMAT = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US)
         private const val TYPE_PROJECT = "project"
         private const val TYPE_MIRROR = "mirror"
         private const val TYPE_PROJECT_TITLE = "Project"

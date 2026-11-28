@@ -1,7 +1,7 @@
 package org.koitharu.kotatsu.parsers.site.id
 
 import okhttp3.HttpUrl
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -113,6 +113,11 @@ public class CosmicToonsParser(
         filter: MangaListFilter,
     ): List<Manga> {
         val key = listKey(order, filter)
+        // Bound the per-list-key cursor caches so long sessions do not grow unbounded.
+        if (pageCursors.size > MAX_CACHED_LISTS) {
+            pageCursors.clear()
+            pageHasNext.clear()
+        }
         val cursors = pageCursors.computeIfAbsent(key) { ConcurrentHashMap() }
         val hasNextPages = pageHasNext.computeIfAbsent(key) { ConcurrentHashMap() }
 
@@ -330,7 +335,7 @@ public class CosmicToonsParser(
             order == SortOrder.POPULARITY || order == SortOrder.POPULARITY_WEEK -> "/v1/manga/popularToday"
             else -> "/v1/manga/filter"
         }
-        val builder = (apiBaseUrl() + endpoint).toHttpUrlOrNull()!!.newBuilder()
+        val builder = (apiBaseUrl() + endpoint).toHttpUrl().newBuilder()
         if (query != null) {
             builder.addQueryParameter("q", query)
         } else {
@@ -443,9 +448,9 @@ public class CosmicToonsParser(
 
     private fun parseChapterDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                SimpleDateFormat(pattern, Locale.US).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -465,7 +470,7 @@ public class CosmicToonsParser(
         "${order.name}|${filter.query}|${filter.tags.joinToString(",") { it.key }}|${filter.states}|${filter.types}"
 
     private fun String.slugify(): String = lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "-")
+        .replace(NON_ALNUM_REGEX, "-")
         .trim('-')
 
     private suspend fun getJson(url: String): JSONObject {
@@ -556,12 +561,14 @@ public class CosmicToonsParser(
             "05.cosmicscans.to",
             "cosmicscans.to",
         )
+        private const val MAX_CACHED_LISTS = 32
+        private val NON_ALNUM_REGEX = Regex("[^a-z0-9]+")
         private val IMAGE_SRC_REGEX = Regex("<img[^>]+src=['\"]([^'\"]+)['\"]")
 
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss",
             "yyyy-MM-dd'T'HH:mm:ssXXX",
-        )
+        ).map { SimpleDateFormat(it, Locale.US) }.toTypedArray()
 
         private val GENRES = listOf(
             "action" to "Action",

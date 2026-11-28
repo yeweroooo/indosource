@@ -202,9 +202,15 @@ public class AinzScansParser(
 
     override suspend fun getPageUrl(page: MangaPage): String = page.url
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val tags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            tags.addAll(cached)
+        } else runCatching {
             val json = getJsonArray(apiBaseUrl() + "genres")
             for (i in 0 until json.length()) {
                 val item = json.optJSONObject(i) ?: continue
@@ -213,7 +219,9 @@ public class AinzScansParser(
                 tags.add(MangaTag(name, slug, source))
             }
         }
-        if (tags.isEmpty()) {
+        if (tags.isNotEmpty()) {
+            cachedRemoteTags = tags.toSet()
+        } else {
             GENRES.forEach { (slug, name) -> tags.add(MangaTag(name, slug, source)) }
         }
         tags.add(MangaTag(COLOR_TAG_TITLE_COLORED, COLOR_TAG_KEY_COLORED, source))
@@ -413,9 +421,9 @@ public class AinzScansParser(
 
     private fun parseChapterDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                SimpleDateFormat(pattern, Locale.US).parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -497,11 +505,11 @@ public class AinzScansParser(
         private const val READING_TAG_TITLE_VERTICAL = "Vertical Scroll"
         private const val READING_TAG_TITLE_PAGE = "Page"
 
-        private val DATE_FORMATS = arrayOf(
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
-        )
+        ).map { SimpleDateFormat(it, Locale.US) }.toTypedArray()
 
         // Fallback list (live /api/genres preferred); verified Aug 2026.
         private val GENRES = listOf(

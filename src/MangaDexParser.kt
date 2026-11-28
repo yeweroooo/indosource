@@ -30,6 +30,9 @@ import tsuki.network.CommonHeaders
 import tsuki.util.await
 import tsuki.util.generateUid
 import tsuki.util.parseJson
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import java.net.InetAddress
 import java.text.SimpleDateFormat
 import java.util.EnumSet
@@ -55,7 +58,7 @@ public class MangaDexParser(
 ) : PagedMangaParser(
     context = context,
     source = MangaParserSource.MANGADEX,
-    pageSize = 32,
+    pageSize = 100,
 ) {
     override val configKeyDomain: ConfigKey.Domain = ConfigKey.Domain(
         "api.mangadex.org",
@@ -239,22 +242,24 @@ public class MangaDexParser(
             .build()
             .toString()
 
-        val json = getJson(detailUrl)
+        // Detail, statistics and chapter feed are independent GETs — fetch in parallel.
+        val (json, rating, chapters) = coroutineScope {
+            val detailAsync = async { getJson(detailUrl) }
+            val ratingAsync = async {
+                runCatching {
+                    val statJson = getJson("https://$domain/statistics/manga/$mangaId")
+                    val statObj = statJson.optJSONObject("statistics")?.optJSONObject(mangaId)
+                    val score = statObj?.optJSONObject("rating")?.optDouble("bayesian", 0.0)?.toFloat()
+                        ?: statObj?.optJSONObject("rating")?.optDouble("average", 0.0)?.toFloat()
+                        ?: 0f
+                    if (score > 0f) (score / 10f).coerceIn(0f, 1f) else RATING_UNKNOWN
+                }.getOrDefault(RATING_UNKNOWN)
+            }
+            val chaptersAsync = async { fetchChapters(mangaId) }
+            Triple(detailAsync.await(), ratingAsync.await(), chaptersAsync.await())
+        }
         val mangaData = json.optJSONObject("data") ?: return manga
         val parsed = parseManga(mangaData)
-
-        // Rating from statistics
-        val rating = runCatching {
-            val statJson = getJson("https://$domain/statistics/manga/$mangaId")
-            val statObj = statJson.optJSONObject("statistics")?.optJSONObject(mangaId)
-            val score = statObj?.optJSONObject("rating")?.optDouble("bayesian", 0.0)?.toFloat()
-                ?: statObj?.optJSONObject("rating")?.optDouble("average", 0.0)?.toFloat()
-                ?: 0f
-            if (score > 0f) (score / 10f).coerceIn(0f, 1f) else RATING_UNKNOWN
-        }.getOrDefault(RATING_UNKNOWN)
-
-        // All chapters feed
-        val chapters = fetchChapters(mangaId)
 
         return parsed.copy(
             rating = rating.takeUnless { it == RATING_UNKNOWN } ?: manga.rating,
@@ -357,9 +362,15 @@ public class MangaDexParser(
         }
     }
 
+    @Volatile
+    private var cachedRemoteTags: Set<MangaTag>? = null
+
     override suspend fun getFilterOptions(): MangaListFilterOptions {
         val dynamicTags = LinkedHashSet<MangaTag>()
-        runCatching {
+        val cached = cachedRemoteTags
+        if (cached != null) {
+            dynamicTags.addAll(cached)
+        } else runCatching {
             val json = getJson("https://$domain/manga/tag")
             val data = json.optJSONArray("data")
             if (data != null) {
@@ -373,6 +384,7 @@ public class MangaDexParser(
             }
         }
 
+        if (dynamicTags.isNotEmpty()) cachedRemoteTags = dynamicTags.toSet()
         val tags = if (dynamicTags.isNotEmpty()) {
             dynamicTags
         } else {
@@ -426,85 +438,97 @@ public class MangaDexParser(
         )
     }
 
-    private suspend fun fetchChapters(mangaId: String): List<MangaChapter> {
-        val chapters = ArrayList<MangaChapter>()
-        var offset = 0
-        val maxChapters = 3000
+    private suspend fun fetchChapters(mangaId: String): List<MangaChapter> = coroutineScope {
+        val firstJson = runCatching { getJson(feedUrl(mangaId, 0)) }.getOrNull()
+            ?: return@coroutineScope emptyList()
+        val firstData = firstJson.optJSONArray("data") ?: return@coroutineScope emptyList()
+        if (firstData.length() == 0) return@coroutineScope emptyList()
 
-        while (offset < maxChapters) {
-            val feedUrl = "https://$domain/manga/$mangaId/feed".toHttpUrl().newBuilder()
-                .addQueryParameter("limit", "500")
-                .addQueryParameter("offset", offset.toString())
-                .addQueryParameter("includes[]", "scanlation_group")
-                .addQueryParameter("order[volume]", "asc")
-                .addQueryParameter("order[chapter]", "asc")
-                .addQueryParameter("contentRating[]", "safe")
-                .addQueryParameter("contentRating[]", "suggestive")
-                .addQueryParameter("contentRating[]", "erotica")
-                .addQueryParameter("contentRating[]", "pornographic")
-                .build()
-                .toString()
+        val chapters = ArrayList(parseFeedPage(firstData))
+        // Remaining pages are independent GETs — fetch them in parallel.
+        val total = firstJson.optInt("total", 0)
+        val offsets = ArrayList<Int>()
+        var offset = firstData.length()
+        while (offset < MAX_CHAPTERS && offset < total) {
+            offsets.add(offset)
+            offset += FEED_PAGE_LIMIT
+        }
+        if (offsets.isNotEmpty()) {
+            val pages = offsets
+                .map { off -> async { runCatching { getJson(feedUrl(mangaId, off)) }.getOrNull()?.optJSONArray("data") } }
+                .awaitAll()
+            for (data in pages) {
+                if (data != null) chapters.addAll(parseFeedPage(data))
+            }
+        }
+        chapters.sortWith(compareBy({ it.volume }, { it.number }))
+        chapters
+    }
 
-            val feedJson = runCatching { getJson(feedUrl) }.getOrNull() ?: break
-            val feedData = feedJson.optJSONArray("data") ?: break
-            val len = feedData.length()
-            if (len == 0) break
+    private fun feedUrl(mangaId: String, offset: Int): String =
+        "https://$domain/manga/$mangaId/feed".toHttpUrl().newBuilder()
+            .addQueryParameter("limit", FEED_PAGE_LIMIT.toString())
+            .addQueryParameter("offset", offset.toString())
+            .addQueryParameter("includes[]", "scanlation_group")
+            .addQueryParameter("order[volume]", "asc")
+            .addQueryParameter("order[chapter]", "asc")
+            .addQueryParameter("contentRating[]", "safe")
+            .addQueryParameter("contentRating[]", "suggestive")
+            .addQueryParameter("contentRating[]", "erotica")
+            .addQueryParameter("contentRating[]", "pornographic")
+            .build()
+            .toString()
 
-            for (i in 0 until len) {
-                val chObj = feedData.optJSONObject(i) ?: continue
-                val chAttr = chObj.optJSONObject("attributes") ?: continue
-                val externalUrl = chAttr.optString("externalUrl").takeIf(String::isNotBlank)
-                if (externalUrl != null) continue // Skip external reader links (e.g. MangaPlus)
+    private fun parseFeedPage(feedData: JSONArray): List<MangaChapter> {
+        val chapters = ArrayList<MangaChapter>(feedData.length())
+        for (i in 0 until feedData.length()) {
+            val chObj = feedData.optJSONObject(i) ?: continue
+            val chAttr = chObj.optJSONObject("attributes") ?: continue
+            val externalUrl = chAttr.optString("externalUrl").takeIf(String::isNotBlank)
+            if (externalUrl != null) continue // Skip external reader links (e.g. MangaPlus)
 
-                val chId = chObj.optString("id").takeIf(String::isNotBlank) ?: continue
-                val chNum = chAttr.optString("chapter").toFloatOrNull() ?: 0f
-                val chVol = chAttr.optString("volume").toIntOrNull() ?: 0
-                val rawTitle = chAttr.optString("title").trim()
-                val chNumStr = chAttr.optString("chapter").trim()
-                val lang = chAttr.optString("translatedLanguage").trim().ifBlank { "en" }
-                val branch = lang.uppercase(Locale.ROOT)
-                val uploadDate = parseIsoDate(chAttr.optString("publishAt").ifBlank { chAttr.optString("createdAt") })
+            val chId = chObj.optString("id").takeIf(String::isNotBlank) ?: continue
+            val chNum = chAttr.optString("chapter").toFloatOrNull() ?: 0f
+            val chVol = chAttr.optString("volume").toIntOrNull() ?: 0
+            val rawTitle = chAttr.optString("title").trim()
+            val chNumStr = chAttr.optString("chapter").trim()
+            val lang = chAttr.optString("translatedLanguage").trim().ifBlank { "en" }
+            val branch = lang.uppercase(Locale.ROOT)
+            val uploadDate = parseIsoDate(chAttr.optString("publishAt").ifBlank { chAttr.optString("createdAt") })
 
-                var scanlator: String? = null
-                val rels = chObj.optJSONArray("relationships")
-                if (rels != null) {
-                    for (r in 0 until rels.length()) {
-                        val rel = rels.optJSONObject(r) ?: continue
-                        if (rel.optString("type") == "scanlation_group") {
-                            scanlator = rel.optJSONObject("attributes")?.optString("name")?.takeIf(String::isNotBlank)
-                            if (scanlator != null) break
-                        }
+            var scanlator: String? = null
+            val rels = chObj.optJSONArray("relationships")
+            if (rels != null) {
+                for (r in 0 until rels.length()) {
+                    val rel = rels.optJSONObject(r) ?: continue
+                    if (rel.optString("type") == "scanlation_group") {
+                        scanlator = rel.optJSONObject("attributes")?.optString("name")?.takeIf(String::isNotBlank)
+                        if (scanlator != null) break
                     }
                 }
-
-                val title = when {
-                    rawTitle.isNotBlank() && chNumStr.isNotBlank() -> "Ch. $chNumStr - $rawTitle"
-                    rawTitle.isNotBlank() -> rawTitle
-                    chNumStr.isNotBlank() -> "Chapter $chNumStr"
-                    else -> "Chapter ${formatChapterNumber(chNum)}"
-                }
-
-                chapters.add(
-                    MangaChapter(
-                        id = generateUid(source, chId),
-                        title = title,
-                        number = chNum,
-                        volume = chVol,
-                        url = "/chapter/$chId",
-                        scanlator = scanlator,
-                        uploadDate = uploadDate,
-                        branch = branch,
-                        source = source,
-                    ),
-                )
             }
 
-            val total = feedJson.optInt("total", 0)
-            offset += len
-            if (offset >= total) break
-        }
+            val title = when {
+                rawTitle.isNotBlank() && chNumStr.isNotBlank() -> "Ch. $chNumStr - $rawTitle"
+                rawTitle.isNotBlank() -> rawTitle
+                chNumStr.isNotBlank() -> "Chapter $chNumStr"
+                else -> "Chapter ${formatChapterNumber(chNum)}"
+            }
 
-        chapters.sortWith(compareBy({ it.volume }, { it.number }))
+            chapters.add(
+                MangaChapter(
+                    id = generateUid(source, chId),
+                    title = title,
+                    number = chNum,
+                    volume = chVol,
+                    url = "/chapter/$chId",
+                    scanlator = scanlator,
+                    uploadDate = uploadDate,
+                    branch = branch,
+                    source = source,
+                ),
+            )
+        }
         return chapters
     }
 
@@ -627,11 +651,9 @@ public class MangaDexParser(
 
     private fun parseIsoDate(raw: String?): Long {
         val date = raw?.trim()?.takeIf(String::isNotEmpty) ?: return 0L
-        return DATE_FORMATS.firstNotNullOfOrNull { pattern ->
+        return DATE_FORMATTERS.firstNotNullOfOrNull { sdf ->
             runCatching {
-                val sdf = SimpleDateFormat(pattern, Locale.US)
-                sdf.timeZone = TimeZone.getTimeZone("UTC")
-                sdf.parse(date)?.time
+                synchronized(sdf) { sdf.parse(date) }?.time
             }.getOrNull()
         } ?: 0L
     }
@@ -657,9 +679,10 @@ public class MangaDexParser(
         return response.parseJson()
     }
 
-    // OkHttpClient dengan custom DNS: domain *.mangadex.org di-resolve ke IP asli
-    // (45.129.229.1/2), bukan ke IP internet-positif (103.x.x.x). Domain lain
-    // tetap pakai system DNS. Ini mengatasi DNS poisoning dari ISP Indonesia.
+    // OkHttpClient dengan custom DNS: system DNS dicoba dulu; kalau gagal
+    // (mis. DNS poisoning ISP Indonesia yang mengembalikan NXDOMAIN/UnknownHost),
+    // baru fallback ke IP hardcoded 45.129.229.1/2. Domain lain tetap pakai
+    // system DNS. Urutan ini aman menghadapi rotasi IP.
     private val mangadexClient: OkHttpClient by lazy {
         context.httpClient.newBuilder()
             .dns(MangaDexDns)
@@ -674,20 +697,27 @@ public class MangaDexParser(
 
         override fun lookup(hostname: String): List<InetAddress> {
             if (hostname.endsWith(".mangadex.org") || hostname == "mangadex.org") {
-                return MANGADEX_IPS
+                return try {
+                    okhttp3.Dns.SYSTEM.lookup(hostname)
+                } catch (e: java.net.UnknownHostException) {
+                    MANGADEX_IPS
+                }
             }
             return okhttp3.Dns.SYSTEM.lookup(hostname)
         }
     }
 
     private companion object {
-        private val DATE_FORMATS = arrayOf(
+        private const val MAX_CHAPTERS = 3000
+        private const val FEED_PAGE_LIMIT = 500
+
+        private val DATE_FORMATTERS = arrayOf(
             "yyyy-MM-dd'T'HH:mm:ssXXX",
             "yyyy-MM-dd'T'HH:mm:ss.SSSXXX",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
             "yyyy-MM-dd'T'HH:mm:ss",
             "yyyy-MM-dd",
-        )
+        ).map { SimpleDateFormat(it, Locale.US).apply { timeZone = TimeZone.getTimeZone("UTC") } }.toTypedArray()
 
         private val ALL_TAGS = listOf(
             // content
